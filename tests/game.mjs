@@ -52,3 +52,24 @@ for (let x of [-5, 0, 5]) {
   assert(Math.hypot(a.u - b.u, a.v - b.v) < 1e-7, 'Stair seam must not jump');
 }
 console.log('PASS: obstacle detour, floor-to-stair seam, and image-space clicks');
+
+// Every walkable spot, including ones hugging walls and obstacles, must be able to
+// route to the scene exit without cutting through anything.
+for (let scene of scenes) {
+  let checked = 0;
+  for (let z = 0.2; z < scene.length; z += 0.29)
+    for (let x = scene.bounds[0]; x < scene.bounds[1]; x += 0.11) {
+      if (blocked(scene, x, z)) continue;
+      checked++;
+      const start = { x, z },
+        path = route(scene, start, scene.exit);
+      assert(path.length, `No route to exit in ${scene.id} from ${x.toFixed(2)},${z.toFixed(2)}`);
+      let prev = start;
+      for (let next of path) {
+        assert(lineClear(scene, prev, next), `Route cuts through an obstacle in ${scene.id}`);
+        prev = next;
+      }
+    }
+  assert(checked > 500);
+}
+console.log('PASS: every walkable start point routes to its exit');

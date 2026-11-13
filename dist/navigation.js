@@ -69,13 +69,27 @@ export function lineClear(scene, a, b) {
   }
   return true;
 }
+// The grid node nearest to `start` that is walkable and directly reachable from it.
+// Plain rounding can land inside the wall margin when the player hugs a wall.
+function startNode(scene, start, step) {
+  const cx = Math.round(start.x / step),
+    cz = Math.round(start.z / step),
+    candidates = [];
+  for (let i = -2; i <= 2; i++)
+    for (let j = -2; j <= 2; j++) candidates.push({ x: (cx + i) * step, z: (cz + j) * step });
+  candidates.sort(
+    (a, b) => Math.hypot(a.x - start.x, a.z - start.z) - Math.hypot(b.x - start.x, b.z - start.z),
+  );
+  return candidates.find((p) => !blocked(scene, p.x, p.z) && lineClear(scene, start, p)) ?? null;
+}
 export function route(scene, start, goal) {
   if (blocked(scene, goal.x, goal.z)) return [];
   if (lineClear(scene, start, goal)) return [goal];
   let step = 0.4,
     key = (p) => Math.round(p.x / step) + ',' + Math.round(p.z / step),
-    s = { x: Math.round(start.x / step) * step, z: Math.round(start.z / step) * step },
-    queue = [s],
+    s = startNode(scene, start, step);
+  if (!s) return [];
+  let queue = [s],
     seen = new Map([[key(s), null]]),
     end = null;
   for (let head = 0; head < queue.length && head < 14000; head++) {
@@ -104,7 +118,7 @@ export function route(scene, start, goal) {
     path.unshift(p);
     p = seen.get(key(p));
   }
-  path.shift();
+  // Keep the start node: smoothing drops it when the player can see past it.
   let clean = [],
     prev = start;
   for (let i = 0; i < path.length; i++) {
