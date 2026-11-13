@@ -57,6 +57,7 @@ function useTouch(on) {
   if (mode === 'play') $('#touch').hidden = !on;
 }
 frame.classList.toggle('touch', touch);
+let last = performance.now(); // previous display frame, for frame timing
 let W = 1280,
   H = 720,
   assets = {},
@@ -197,7 +198,7 @@ let audio, master, rainGain, humGain, noiseBuffer;
 function makeAudio() {
   try {
     if (audio) {
-      audio.resume();
+      syncAudio();
       return;
     }
     audio = new (window.AudioContext || window.webkitAudioContext)();
@@ -410,7 +411,34 @@ function pause(show = true) {
   keys.clear();
   if (show) openDialog('#modal');
   else closeDialog('#modal');
-  if (audio) master.gain.setTargetAtTime(show || muted ? 0 : 0.42, audio.currentTime, 0.1);
+  syncAudio();
+}
+// Suspension: while the page is hidden or unfocused the whole game stands still. tick() runs no
+// timeline at all (play, insert shots, recovery, transitions, the ending) and the audio context
+// is suspended, so sounds already playing freeze instead of running on unheard. Ordinary play
+// also opens the pause menu; every other mode carries on from the same instant on return.
+// Both functions are idempotent, so blur and visibility events arriving together are harmless.
+let suspended = false;
+function suspend() {
+  if (suspended) return;
+  suspended = true;
+  keys.clear();
+  if (mode === 'play') pause(true);
+  syncAudio();
+}
+function wake() {
+  if (!suspended || document.hidden || !(document.hasFocus?.() ?? true)) return;
+  suspended = false;
+  last = performance.now(); // no catch-up jump for the time spent away
+  syncAudio();
+}
+// One place decides what the player hears: their sound preference, pause and suspension.
+function syncAudio() {
+  if (!audio) return;
+  const halted = suspended || mode === 'pause';
+  master.gain.setTargetAtTime(halted || muted ? 0 : 0.42, audio.currentTime, 0.1);
+  if (halted) audio.suspend?.();
+  else audio.resume?.();
 }
 function changeScene(next) {
   if (sceneIndex === 1) leavePlaza(plazaEvent);
@@ -736,8 +764,7 @@ $('#sound').onclick = () => {
   muted = !muted;
   $('#sound').textContent = muted ? 'SOUND OFF' : 'SOUND ON';
   $('#sound').setAttribute('aria-pressed', String(!muted));
-  if (audio)
-    master.gain.setTargetAtTime(muted || mode === 'pause' ? 0 : 0.42, audio.currentTime, 0.1);
+  syncAudio();
 };
 $('#restart').onclick = restart;
 $('#interaction').onclick = () => interact();
@@ -749,6 +776,7 @@ const gameKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'];
 const playing = () => mode === 'play' || mode === 'transition';
 addEventListener('keydown', (e) => {
   if (e.key === 'Tab') trapFocus(e);
+  if (suspended) return;
   if (playing() && gameKeys.includes(e.code)) e.preventDefault();
   if (e.code === 'Escape' && !e.repeat) {
     if (mode === 'title') closeDialog('#modal');
@@ -780,13 +808,9 @@ addEventListener('keyup', (e) => {
   // Space activates a focused button on keyup; during play it means Interact instead.
   if (playing() && e.code === 'Space') e.preventDefault();
 });
-addEventListener('blur', () => {
-  keys.clear();
-  if (mode === 'play') pause(true);
-});
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && mode === 'play') pause(true);
-});
+addEventListener('blur', suspend);
+addEventListener('focus', wake);
+document.addEventListener('visibilitychange', () => (document.hidden ? suspend() : wake()));
 function pointer(e) {
   let r = canvas.getBoundingClientRect();
   return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height };
@@ -828,7 +852,8 @@ canvas.addEventListener('pointerleave', () => {
 });
 canvas.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'touch' && !touch) useTouch(true);
-  if (mode !== 'play' || controlLocked() || performance.now() - dialogClosedAt < 400) return;
+  if (suspended || mode !== 'play' || controlLocked() || performance.now() - dialogClosedAt < 400)
+    return;
   let { u, v } = pointer(e),
     o = objectAt(u, v, e.pointerType === 'touch' ? 22 : 4),
     s = scenes[sceneIndex],
@@ -1792,15 +1817,17 @@ function drawMarker() {
   }
   ctx.restore();
 }
-let last = performance.now();
+// Advances the game by one display frame; nothing moves while paused, choosing or suspended.
+function tick(dt) {
+  if (suspended || mode === 'pause' || mode === 'choice') return;
+  elapsed += dt;
+  let count = Math.ceil(dt / 0.05);
+  for (let i = 0; i < count; i++) update(dt / count);
+}
 function render(now) {
   let dt = Math.min(0.15, (now - last) / 1000);
   last = now;
-  if (mode !== 'pause' && mode !== 'choice') {
-    elapsed += dt;
-    let count = Math.ceil(dt / 0.05);
-    for (let i = 0; i < count; i++) update(dt / count);
-  }
+  tick(dt);
   if (ready) {
     const s = scenes[sceneIndex];
     const insert = sceneIndex === 2 && insertShot(prediction);

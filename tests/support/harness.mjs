@@ -102,6 +102,10 @@ function use(id, predicate) {
   queuedAction = id;
   until(predicate);
 }
+// Display frames through the real gate (tick), as the browser's frame loop would.
+function frames(seconds, dt = 1 / 60) {
+  for (let t = 0; t < seconds - 1e-9; t += dt) tick(dt);
+}
 function goToScene(index) {
   changeScene(index);
   until(() => mode === 'play' && sceneIndex === index);
@@ -114,6 +118,8 @@ export async function bootGame() {
     documentListeners = {};
   const document = {
     hidden: false,
+    blurred: false,
+    hasFocus: () => !document.hidden && !document.blurred,
     activeElement: null,
     querySelector(s) {
       if (!nodes.has(s)) nodes.set(s, makeNode(s));
@@ -161,6 +167,23 @@ export async function bootGame() {
         fn({ clientX: u * 1280, clientY: v * 720, pointerType: 'touch' }),
       ),
     click: (s) => el(s).onclick?.(),
+    // Leaving and returning to the page, as the browser reports it.
+    hide() {
+      document.hidden = true;
+      documentListeners.visibilitychange?.forEach((fn) => fn({}));
+    },
+    show() {
+      document.hidden = false;
+      documentListeners.visibilitychange?.forEach((fn) => fn({}));
+    },
+    blur() {
+      document.blurred = true;
+      windowListeners.blur?.forEach((fn) => fn({}));
+    },
+    focus() {
+      document.blurred = false;
+      windowListeners.focus?.forEach((fn) => fn({}));
+    },
     el: (s) => document.querySelector(s),
     fireWindow: (type, event = {}) => windowListeners[type]?.forEach((fn) => fn(event)),
     fireDocument: (type, event = {}) => documentListeners[type]?.forEach((fn) => fn(event)),
