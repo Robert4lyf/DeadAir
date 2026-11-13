@@ -194,7 +194,7 @@ async function load() {
 }
 $('#retry').onclick = load;
 load();
-let audio, master, rainGain, humGain, noiseBuffer;
+let audio, master, rainGain, humGain, voiceBus, noiseBuffer;
 function makeAudio() {
   try {
     if (audio) {
@@ -224,6 +224,9 @@ function makeAudio() {
     humGain.gain.value = 0.04;
     o.connect(humGain).connect(master);
     o.start();
+    // Transmissions (PA and tower) share a bus so endings can duck the rain under them.
+    voiceBus = audio.createGain();
+    voiceBus.connect(master);
   } catch {
     audio = null;
   }
@@ -242,7 +245,7 @@ function note(freq, duration = 0.15, gain = 0.07, type = 'sine', delay = 0) {
   o.start(at);
   o.stop(at + duration);
 }
-function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0) {
+function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0, bus = master) {
   if (!audio) return;
   const at = audio.currentTime + delay;
   let n = audio.createBufferSource(),
@@ -256,7 +259,7 @@ function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0) {
   g.gain.setValueAtTime(0.0001, audio.currentTime);
   g.gain.setValueAtTime(gain, at);
   g.gain.exponentialRampToValueAtTime(0.001, at + duration);
-  n.connect(f).connect(g).connect(p).connect(master);
+  n.connect(f).connect(g).connect(p).connect(bus);
   n.start(at);
   n.stop(at + duration);
 }
@@ -269,6 +272,7 @@ function paVoice(words = 8, pan = 0.7, delay = 0, gain = 1) {
       pan,
       1400 + (i % 4) * 260,
       delay + i * 0.27,
+      voiceBus,
     );
 }
 // Subtitles. Every line belongs to the scene it was said in and may carry a `while` condition:
@@ -669,6 +673,7 @@ function finish(choice) {
   path = [];
   $('#touch').hidden = true;
   clearSubtitles();
+  cancelAmbience();
   runEndingTimeline();
 }
 // Fires the ending's cues and captions as gameplay time reaches them, each exactly once.
@@ -682,17 +687,30 @@ function runEndingTimeline() {
   while (e.nextCue < e.cues.length && e.cues[e.nextCue].at <= e.clock)
     endingCue(e.cues[e.nextCue++].id);
 }
+// Drops any queued rain/hum automation (e.g. an ending's rain swell) so nothing stale plays on.
+function cancelAmbience() {
+  if (!audio) return;
+  for (const g of [rainGain.gain, humGain.gain]) {
+    const v = g.value;
+    g.cancelScheduledValues(audio.currentTime);
+    g.setValueAtTime(v, audio.currentTime);
+  }
+}
 function endingCue(id) {
   const now = audio?.currentTime ?? 0,
     chord = (gain) =>
       [147, 220, 294, 370].forEach((f, i) => note(f, 3.2 - i * 0.3, gain, 'triangle', i * 0.3));
   if (id === 'broadcast' || id === 'early-broadcast' || id === 'late-broadcast') {
     ending.flareAt = time;
-    if (audio && id !== 'late-broadcast') {
-      rainGain.gain.setTargetAtTime(0.22, now, 1.2);
+    if (audio) {
+      // The rain swells for the rest of the ending, but ducks while the tower transmits so
+      // each transmission (including the late one) is clearly heard over it.
+      rainGain.gain.cancelScheduledValues(now);
+      rainGain.gain.setTargetAtTime(0.06, now, 0.15);
+      rainGain.gain.setTargetAtTime(0.22, now + 2.8, 0.9);
       humGain.gain.setTargetAtTime(0.1, now, 1);
     }
-    paVoice(10, id === 'early-broadcast' ? 0.45 : 0, 0, id === 'late-broadcast' ? 0.85 : 1);
+    paVoice(10, id === 'early-broadcast' ? 0.45 : 0, 0, 1.6);
     if (id !== 'early-broadcast') chord(0.035);
   } else if (id === 'dead-air') {
     // Everything falls away; the only sound left is the click of a channel opening.
@@ -739,6 +757,7 @@ function restart() {
   statusUntil = 0;
   clearSubtitles();
   $('#fade').style.opacity = '0';
+  cancelAmbience();
   if (audio) {
     rainGain.gain.setTargetAtTime(0.11, audio.currentTime, 0.5);
     humGain.gain.setTargetAtTime(0.04, audio.currentTime, 0.5);

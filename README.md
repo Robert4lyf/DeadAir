@@ -40,13 +40,23 @@ Three fixed-camera scenes. A direct run takes about a minute of game time; a fir
 
 1. **The side street.** A broadcast warns before it goes live. Shelter under the right-hand awning to wait it out, or cut the service feed at the breaker. If the tower catches you in the open, the picture skips, you land back under the awning, and the transmission _holds_ on you: it will not pass by itself until you cut the feed. The street lamp that caught you stays red for the rest of the game.
 2. **The broadcast plaza.** Partway across, a horn speaker announces a guest; the studio doors then open on their own while you are still far away, and the PA greets you in a way that depends on how the street went.
-3. **Studio 001.** The monitor is a live feed of the room. Watch it and the picture jumps seven seconds ahead: you see yourself walk to a tape mark under the microphone. You then have seven seconds. Stand on the mark to **follow** the prediction, or stay away to **resist** it. Either way, take the microphone and choose to **speak** or **stay silent**.
+3. **Studio 001.** The monitor is a live feed of the room. Watching it always starts from its viewing point beside the desk (you walk there first if needed); the picture then jumps seven seconds ahead and you see yourself walk to a tape mark under the microphone. You then have seven seconds. Stand on the mark to **follow** the prediction, or stay away to **resist** it. Either way, take the microphone and choose to **speak** or **stay silent**.
 
 ### Seeing the variations
 
 - **Prediction:** to follow, tap or click the microphone (or walk onto the tape mark) during the countdown; to resist, stand still at the monitor. Following syncs the feed and locks the ON AIR sign; resisting tears the feed and cuts back to the monitor, where the figure turns to look at you.
-- **Ending:** speaking makes the tower sign blaze and the rain louder; silence darkens the sign and fades rain and hum to seven seconds of dead air. If the tower caught you on the street (or you cut the feed and then speak), the final shot returns to the side street and its lamp. The ending text reflects the prediction and the street.
+- **Ending:** each prediction outcome × choice has its own short timeline, documented in `dist/ending.js`:
+
+  - speak after following: the tower transmits at once and its sign blazes;
+  - speak after resisting: the speakers transmit before you speak, and your own transmission goes out exactly seven seconds later;
+  - silence after following: seven seconds of uninterrupted dead air (sign dark, rain and hum silent);
+  - silence after resisting: the dead air is broken three seconds in by a transmission while the dark sign stutters red.
+
+  If the tower caught you on the street (or you cut the feed and then speak), the final shot returns to the side street and its lamp.
+
 - **Return to the city** restarts from the street with every consequence cleared.
+
+Switching tabs or windows freezes the game wherever it is (including cinematics and the ending) and suspends its audio; ordinary play returns to the pause menu.
 
 ## Tests
 
