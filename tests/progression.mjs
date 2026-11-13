@@ -73,9 +73,8 @@ use('microphone', () => mode === 'choice');
 finish('speak');
 assert.equal(ending.shot, 'street', 'The ending returns to where the tower caught you');
 assert.equal(ending.lamp, 'red');
-assert(ending.echo);
 until(() => mode === 'end');
-assert.match(document.querySelector('#endLine').textContent, /seven seconds late/);
+assert.match(document.querySelector('#endLine').textContent, /seven seconds later/);
 assert.match(document.querySelector('#endStreet').textContent, /red lamp that caught you/);
 `);
 });
@@ -276,3 +275,51 @@ assert.equal(prediction.phase, 'countdown');
   g.fireWindow('blur');
   g.run(`assert.equal(mode, 'pause');`);
 });
+
+for (const [choice, outcome, expected] of [
+  ['speak', 'followed', [['broadcast', 0]]],
+  [
+    'speak',
+    'resisted',
+    [
+      ['early-broadcast', 0],
+      ['late-broadcast', 7],
+    ],
+  ],
+  ['silence', 'followed', [['dead-air', 0]]],
+  [
+    'silence',
+    'resisted',
+    [
+      ['dead-air', 0],
+      ['intrusion', 3],
+    ],
+  ],
+])
+  test(`ending ${choice} after ${outcome}: cues fire once, in order, on time, before the card`, async () => {
+    const g = await bootGame();
+    g.run(`
+goToScene(2);
+prediction.phase = 'resolved';
+prediction.outcome = '${outcome}';
+prediction.ready = true;
+prediction.clock = 10; // past the resisted close-up
+walkTo(MARK.x, MARK.z);
+interact('microphone');
+var cues = [], captions = [];
+const originalCue = endingCue;
+endingCue = (id) => (cues.push([id, Math.round(ending.clock * 10) / 10]), originalCue(id));
+finish('${choice}');
+let cardAt = null;
+until(() => {
+  if (subtitle && !captions.includes(subtitle.text)) captions.push(subtitle.text);
+  if (mode === 'end' && cardAt === null) cardAt = ending.clock;
+  return mode === 'end';
+});
+assert.deepEqual(cues, ${JSON.stringify(expected)});
+assert(cardAt >= ending.duration - 0.05, 'The card waits for the whole resolution');
+assert.equal(captions.length, ending.captions.length, 'Every caption was shown');
+step(2);
+assert.equal(cues.length, ${expected.length}, 'Nothing fires again after the card');
+`);
+  });

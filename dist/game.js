@@ -270,18 +270,32 @@ function paVoice(words = 8, pan = 0.7, delay = 0, gain = 1) {
       delay + i * 0.27,
     );
 }
-// Subtitles: lower-priority lines wait their turn instead of being dropped, and text the
-// player asked for (by interacting) always shows at once. Important lines it interrupts resume.
+// Subtitles. Every line belongs to the scene it was said in and may carry a `while` condition:
+// the phase that makes it relevant. A line whose scene or phase has ended is dropped, whether it
+// is showing or still waiting. Lower-priority lines queue rather than being discarded; lines the
+// player asked for (tell) show at once, and important lines they interrupt resume afterwards
+// only if they are still relevant.
 let subtitle = null;
 const subtitleQueue = [];
+function relevant(entry) {
+  return time < entry.expires && entry.scene === sceneIndex && (!entry.while || entry.while());
+}
 function showSubtitle(entry) {
   subtitle = entry;
   entry.until = time + entry.seconds;
   setText('#subtitle', entry.text);
 }
-function say(text, seconds = 5, priority = 1, requested = false) {
-  const entry = { text, seconds, priority, until: 0, expires: time + seconds + 6 },
-    active = subtitle && time < subtitle.until;
+function say(text, seconds = 5, priority = 1, { requested = false, while: valid = null } = {}) {
+  const entry = {
+      text,
+      seconds,
+      priority,
+      until: 0,
+      expires: time + seconds + 6,
+      scene: sceneIndex,
+      while: valid,
+    },
+    active = subtitle && time < subtitle.until && relevant(subtitle);
   if (active && subtitle.text === text) return;
   if (!active || requested || priority >= subtitle.priority) {
     if (active && subtitle.priority >= 3 && subtitle.priority > priority) {
@@ -296,16 +310,21 @@ function say(text, seconds = 5, priority = 1, requested = false) {
   }
 }
 // Text that answers a player's own action.
-function tell(text, seconds = 5, priority = 2) {
-  say(text, seconds, priority, true);
+function tell(text, seconds = 5, priority = 2, options = {}) {
+  say(text, seconds, priority, { ...options, requested: true });
 }
 function advanceSubtitles() {
-  if (!subtitle || time < subtitle.until) return;
+  if (subtitle && time < subtitle.until && relevant(subtitle)) return;
   subtitle = null;
   while (subtitleQueue.length) {
     const next = subtitleQueue.shift();
-    if (time < next.expires) return showSubtitle(next);
+    if (relevant(next)) return showSubtitle(next);
   }
+  setText('#subtitle', '');
+}
+function clearSubtitles() {
+  subtitle = null;
+  subtitleQueue.length = 0;
   setText('#subtitle', '');
 }
 function status(text, seconds = 2) {
@@ -390,6 +409,7 @@ function changeScene(next) {
 }
 function applyTransition() {
   sceneIndex = transitionTarget;
+  advanceSubtitles(); // lines from the previous scene end with it
   let spawn =
     sceneIndex === 0
       ? { x: 0, z: 22.1 }
@@ -577,6 +597,9 @@ function finish(choice) {
   closeDialog('#decision');
   ending = {
     clock: 0,
+    nextCue: 0,
+    nextCaption: 0,
+    flareAt: -10, // when the tower last transmitted, for the sign's flare
     ...composeEnding({
       choice,
       outcome: prediction.outcome,
@@ -588,21 +611,43 @@ function finish(choice) {
   keys.clear();
   path = [];
   $('#touch').hidden = true;
-  subtitleQueue.length = 0;
-  say(ending.caption, ending.duration, 9);
-  if (!audio) return;
-  const now = audio.currentTime;
-  if (choice === 'speak') {
-    rainGain.gain.setTargetAtTime(0.22, now, 1.2);
-    humGain.gain.setTargetAtTime(0.1, now, 1);
-    paVoice(10, 0);
-    if (ending.echo) paVoice(10, -0.5, 1.9, 0.7);
-    [147, 220, 294, 370].forEach((f, i) => note(f, 3.6 - i * 0.3, 0.035, 'triangle', i * 0.35));
-  } else {
-    // Dead air: everything falls away and stays away for the full seven seconds.
-    rainGain.gain.setTargetAtTime(0, now, 0.7);
-    humGain.gain.setTargetAtTime(0, now, 0.5);
+  clearSubtitles();
+  runEndingTimeline();
+}
+// Fires the ending's cues and captions as gameplay time reaches them, each exactly once.
+function runEndingTimeline() {
+  const e = ending;
+  while (e.nextCaption < e.captions.length && e.captions[e.nextCaption].at <= e.clock) {
+    const c = e.captions[e.nextCaption++],
+      until = e.captions[e.nextCaption]?.at ?? e.duration;
+    say(c.text, until - c.at, 9, { while: () => mode === 'ending' });
+  }
+  while (e.nextCue < e.cues.length && e.cues[e.nextCue].at <= e.clock)
+    endingCue(e.cues[e.nextCue++].id);
+}
+function endingCue(id) {
+  const now = audio?.currentTime ?? 0,
+    chord = (gain) =>
+      [147, 220, 294, 370].forEach((f, i) => note(f, 3.2 - i * 0.3, gain, 'triangle', i * 0.3));
+  if (id === 'broadcast' || id === 'early-broadcast' || id === 'late-broadcast') {
+    ending.flareAt = time;
+    if (audio && id !== 'late-broadcast') {
+      rainGain.gain.setTargetAtTime(0.22, now, 1.2);
+      humGain.gain.setTargetAtTime(0.1, now, 1);
+    }
+    paVoice(10, id === 'early-broadcast' ? 0.45 : 0, 0, id === 'late-broadcast' ? 0.85 : 1);
+    if (id !== 'early-broadcast') chord(0.035);
+  } else if (id === 'dead-air') {
+    // Everything falls away; the only sound left is the click of a channel opening.
+    if (audio) {
+      rainGain.gain.setTargetAtTime(0, now, 0.7);
+      humGain.gain.setTargetAtTime(0, now, 0.5);
+    }
     note(144, 0.4, 0.05);
+  } else if (id === 'intrusion') {
+    noise(0.09, 0.25, 0.4, 3000);
+    paVoice(6, 0.4, 0.1);
+    note(55, 1.5, 0.07, 'sawtooth');
   }
 }
 function showEndingCard() {
@@ -635,9 +680,7 @@ function restart() {
   skipAt = -10;
   feedTearUntil = 0;
   statusUntil = 0;
-  subtitle = null;
-  subtitleQueue.length = 0;
-  setText('#subtitle', '');
+  clearSubtitles();
   $('#fade').style.opacity = '0';
   if (audio) {
     rainGain.gain.setTargetAtTime(0.11, audio.currentTime, 0.5);
@@ -947,6 +990,7 @@ function update(dt) {
   if (mode === 'ending') {
     time += dt;
     ending.clock += dt;
+    runEndingTimeline();
     advanceSubtitles();
     if (ending.clock >= ending.duration) showEndingCard();
     return;
@@ -1614,9 +1658,10 @@ function drawEnding() {
   ctx.save();
   if (e.tower === 'blazing') {
     ctx.globalCompositeOperation = 'screen';
-    const pulse = reduced ? 0 : Math.sin(time * 6) * 0.08;
-    softLight(su, sv, sr * 0.9, '255,90,70', (0.55 + pulse) * k);
-    softLight(su, sv, sr * 3, '230,40,28', (0.22 + pulse) * k);
+    const pulse = reduced ? 0 : Math.sin(time * 6) * 0.08,
+      flare = Math.max(0, 1 - (time - e.flareAt) / 1.4) * 0.35;
+    softLight(su, sv, sr * 0.9, '255,90,70', (0.55 + pulse) * k + flare);
+    softLight(su, sv, sr * 3, '230,40,28', (0.22 + pulse) * k + flare * 0.6);
   } else {
     // The painted neon is bright: cover the whole sign evenly, then dim its halo.
     ctx.globalCompositeOperation = 'multiply';
@@ -1624,6 +1669,12 @@ function drawEnding() {
     polygon(sign);
     ctx.fill();
     softLight(su, sv, sr * 2.2, '30,32,38', 0.6 * k);
+    // Silence broken: the dark sign stutters back to red while the tower transmits.
+    if (e.intrusion && e.clock >= e.intrusion.from && e.clock < e.intrusion.to) {
+      const on = reduced || Math.sin(time * 31) * Math.sin(time * 7) > -0.2;
+      ctx.globalCompositeOperation = 'screen';
+      softLight(su, sv, sr * 1.2, '255,60,40', on ? 0.6 : 0.12);
+    }
   }
   ctx.restore();
   if (index === 0) {
