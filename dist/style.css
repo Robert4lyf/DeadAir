@@ -879,4 +879,12 @@ header {
   #frame.touch #touch {
     bottom: 27%;
   }
+  /* On touch the prompt is a button; keep it off the walkable floor. The lower-left corner is
+     railing, planter or cabinets in every scene. */
+  #frame.touch #interaction {
+    left: max(3%, calc(var(--safe-l) + 8px));
+    bottom: 27%;
+    transform: none;
+    min-height: 44px;
+  }
 }
