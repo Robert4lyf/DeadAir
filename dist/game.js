@@ -1287,15 +1287,16 @@ function facingTo(a, b) {
   return Math.atan2(q.u - p.u, -(q.v - p.v));
 }
 // Tape cross on the studio floor. `map` converts frame coordinates to canvas pixels.
+const TAPE_R = 0.32,
+  TAPE = [
+    [-TAPE_R, -TAPE_R, TAPE_R, TAPE_R],
+    [-TAPE_R, TAPE_R, TAPE_R, -TAPE_R],
+  ];
 function drawTapeMark(map, glow) {
-  const s = scenes[2],
-    r = 0.32;
+  const s = scenes[2];
   ctx.save();
   ctx.lineCap = 'round';
-  for (const [ax, az, bx, bz] of [
-    [-r, -r, r, r],
-    [-r, r, r, -r],
-  ]) {
+  for (const [ax, az, bx, bz] of TAPE) {
     const a = screenPoint(s, MARK.x + ax, MARK.z + az),
       b = screenPoint(s, MARK.x + bx, MARK.z + bz),
       [x0, y0] = map(a.u, a.v),
