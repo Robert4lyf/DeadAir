@@ -81,7 +81,7 @@ async function load() {
     $('#error').hidden = true;
     $('#loading').hidden = false;
     const names = ['street', 'plaza', 'studio', 'idle', 'walk', 'run'];
-    let images = await Promise.all(names.map((n) => loadImage('./art/' + n + '.png')));
+    let images = await Promise.all(names.map((n) => loadImage('./art/' + n + '.webp')));
     names.forEach((n, i) => (assets[n] = images[i]));
     actor = new SpriteActor({ idle: assets.idle, walk: assets.walk, run: assets.run });
     ready = true;
