@@ -1,0 +1,13 @@
+{
+  "name": "dead-air",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fixed-camera industrial noir horror prototype",
+  "scripts": {
+    "test": "node --test tests/*.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
