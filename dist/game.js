@@ -38,6 +38,7 @@ import {
   doorOpenness,
   doorsOpen,
 } from './plaza.js';
+import { composeEnding } from './ending.js';
 const elements = new Map(),
   $ = (s) => {
     if (!elements.has(s)) elements.set(s, document.querySelector(s));
@@ -77,7 +78,8 @@ let player = makePlayer(scenes[0].spawn),
   broadcast = createBroadcast(),
   facts = { notice: false, intercom: false, breaker: false, monitor: false },
   prediction = createPrediction(),
-  plazaEvent = createPlazaEvent();
+  plazaEvent = createPlazaEvent(),
+  ending = null; // the closing sequence once the final choice is made
 // The figure on the studio monitor. Reused every frame and never aliased to the real player.
 const feedActor = makePlayer({ x: 0, z: 0 });
 // Per-frame HUD updates only touch the DOM when a value actually changes.
@@ -233,9 +235,15 @@ function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0) {
   n.stop(at + duration);
 }
 // A horn-speaker voice: band-limited bursts in a speech-like rhythm, panned to the tower.
-function paVoice(words = 8, pan = 0.7) {
+function paVoice(words = 8, pan = 0.7, delay = 0, gain = 1) {
   for (let i = 0; i < words; i++)
-    noise(0.05 + (i % 3) * 0.012, 0.16 + (i % 2) * 0.08, pan, 1400 + (i % 4) * 260, i * 0.27);
+    noise(
+      (0.05 + (i % 3) * 0.012) * gain,
+      0.16 + (i % 2) * 0.08,
+      pan,
+      1400 + (i % 4) * 260,
+      delay + i * 0.27,
+    );
 }
 // Subtitles: lower-priority lines wait their turn instead of being dropped, and text the
 // player asked for (by interacting) always shows at once. Important lines it interrupts resume.
@@ -520,18 +528,80 @@ function interact(id = interaction?.id) {
   updateObjective();
   return true;
 }
+// The final choice plays out in-engine before the card: a cut to the place that remembers
+// the player, with the tower, the rain and the street lamp answering what they chose.
 function finish(choice) {
-  mode = 'end';
+  if (mode !== 'choice') return;
   closeDialog('#decision');
-  $('#hud').hidden = true;
+  ending = {
+    clock: 0,
+    ...composeEnding({
+      choice,
+      outcome: prediction.outcome,
+      caught: broadcast.caught,
+      cut: broadcast.resolution === 'cut',
+    }),
+  };
+  mode = 'ending';
+  keys.clear();
+  path = [];
   $('#touch').hidden = true;
+  subtitleQueue.length = 0;
+  say(ending.caption, ending.duration, 9);
+  if (!audio) return;
+  const now = audio.currentTime;
+  if (choice === 'speak') {
+    rainGain.gain.setTargetAtTime(0.22, now, 1.2);
+    humGain.gain.setTargetAtTime(0.1, now, 1);
+    paVoice(10, 0);
+    if (ending.echo) paVoice(10, -0.5, 1.9, 0.7);
+    [147, 220, 294, 370].forEach((f, i) => note(f, 3.6 - i * 0.3, 0.035, 'triangle', i * 0.35));
+  } else {
+    // Dead air: everything falls away and stays away for the full seven seconds.
+    rainGain.gain.setTargetAtTime(0, now, 0.7);
+    humGain.gain.setTargetAtTime(0, now, 0.5);
+    note(144, 0.4, 0.05);
+  }
+}
+function showEndingCard() {
+  mode = 'end';
+  $('#hud').hidden = true;
+  $('#endingTitle').textContent = ending.title;
+  $('#endLine').textContent = ending.motif;
+  $('#endStreet').textContent = ending.street;
+  $('#endWeather').textContent = ending.weather;
   openDialog('#ending');
-  $('#endLine').textContent =
-    choice === 'speak'
-      ? 'The speakers answer before your lips move. Your voice: “You never left the studio.”'
-      : 'You say nothing. The microphone speaks in your voice. “Good. You remember this time.”';
-  note(144, 2, 0.07);
-  noise(0.04, 1, 0, 600);
+}
+// Back to the start of the street with every sequence and consequence reset; no reload.
+function restart() {
+  closeDialog('#ending');
+  closeDialog('#decision');
+  facts = { notice: false, intercom: false, breaker: false, monitor: false };
+  broadcast = createBroadcast();
+  prediction = createPrediction();
+  plazaEvent = createPlazaEvent();
+  ending = null;
+  sceneIndex = 0;
+  player = makePlayer(scenes[0].spawn);
+  path = [];
+  queuedAction = null;
+  keys.clear();
+  interaction = null;
+  hovered = null;
+  marker = null;
+  arrivalGuard = null;
+  skipAt = -10;
+  feedTearUntil = 0;
+  statusUntil = 0;
+  subtitle = null;
+  subtitleQueue.length = 0;
+  setText('#subtitle', '');
+  $('#fade').style.opacity = '0';
+  if (audio) {
+    rainGain.gain.setTargetAtTime(0.11, audio.currentTime, 0.5);
+    humGain.gain.setTargetAtTime(0.04, audio.currentTime, 0.5);
+  }
+  enter();
 }
 function toggleTorch() {
   torch = !torch;
@@ -554,7 +624,7 @@ $('#sound').onclick = () => {
   if (audio)
     master.gain.setTargetAtTime(muted || mode === 'pause' ? 0 : 0.42, audio.currentTime, 0.1);
 };
-$('#restart').onclick = () => location.reload();
+$('#restart').onclick = restart;
 $('#touchAction').onclick = () => interact();
 $('#touchTorch').onclick = toggleTorch;
 $('#speak').onclick = () => finish('speak');
@@ -821,6 +891,13 @@ function update(dt) {
         1,
       );
     }
+    return;
+  }
+  if (mode === 'ending') {
+    time += dt;
+    ending.clock += dt;
+    advanceSubtitles();
+    if (ending.clock >= ending.duration) showEndingCard();
     return;
   }
   if (mode !== 'play') return;
@@ -1413,17 +1490,94 @@ function random() {
   return seed / 4294967296;
 }
 const rain = Array.from({ length: 80 }, () => [random(), random(), random()]);
-function weather() {
-  if (reduced || sceneIndex === 2) return;
+// Rain overlay. `level` 1 is normal; above 1 adds a second, offset layer; 0 is no rain.
+function weather(level = 1) {
+  if (reduced || level <= 0) return;
   ctx.lineWidth = Math.max(0.5, W / 1900);
-  for (let [x, y, z] of rain) {
-    let u = (((x - elapsed * 0.013) % 1) + 1) % 1,
-      v = (y + elapsed * (0.28 + z * 0.16)) % 1;
-    ctx.strokeStyle = `rgba(175,193,204,${0.025 + z * 0.07})`;
-    ctx.beginPath();
-    ctx.moveTo(u * W, v * H);
-    ctx.lineTo((u - 0.002) * W, (v + 0.014 + z * 0.01) * H);
-    ctx.stroke();
+  const layers = level > 1 ? 2 : 1;
+  for (let layer = 0; layer < layers; layer++) {
+    const alpha = layer ? level - 1 : Math.min(1, level),
+      speed = 1 + layer * 0.35;
+    for (let [x, y, z] of rain) {
+      let u = (((x + layer * 0.37 - elapsed * 0.013) % 1) + 1) % 1,
+        v = (y + layer * 0.5 + elapsed * (0.28 + z * 0.16) * speed) % 1;
+      ctx.strokeStyle = `rgba(175,193,204,${(0.025 + z * 0.07) * alpha})`;
+      ctx.beginPath();
+      ctx.moveTo(u * W, v * H);
+      ctx.lineTo((u - 0.002) * W, (v + 0.014 + z * 0.01) * H);
+      ctx.stroke();
+    }
+  }
+}
+// The tower's ON AIR sign as seen from the street and from the plaza.
+// Outline of the tower's ON AIR sign as painted in the street and plaza backgrounds.
+const TOWER_SIGN = [
+  [
+    [0.585, 0.131],
+    [0.645, 0.131],
+    [0.645, 0.165],
+    [0.585, 0.165],
+  ],
+  [
+    [0.489, 0.08],
+    [0.554, 0.065],
+    [0.554, 0.095],
+    [0.49, 0.12],
+  ],
+];
+const STREET_LAMP = [0.402, 0.392];
+function drawEnding() {
+  const e = ending,
+    k = Math.min(1, e.clock / 2.2),
+    index = e.shot === 'street' ? 0 : 1,
+    sign = TOWER_SIGN[index],
+    su = (sign[0][0] + sign[2][0]) / 2,
+    sv = (sign[0][1] + sign[2][1]) / 2,
+    sr = (sign[2][1] - sign[0][1]) * 1.4;
+  ctx.drawImage(assets[scenes[index].id], 0, 0, W, H);
+  if (index === 1) drawPlaza();
+  ctx.save();
+  if (e.tower === 'blazing') {
+    ctx.globalCompositeOperation = 'screen';
+    const pulse = reduced ? 0 : Math.sin(time * 6) * 0.08;
+    softLight(su, sv, sr * 0.9, '255,90,70', (0.55 + pulse) * k);
+    softLight(su, sv, sr * 3, '230,40,28', (0.22 + pulse) * k);
+  } else {
+    // The painted neon is bright: cover the whole sign evenly, then dim its halo.
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = `rgba(14,16,20,${0.93 * k})`;
+    polygon(sign);
+    ctx.fill();
+    softLight(su, sv, sr * 2.2, '30,32,38', 0.6 * k);
+  }
+  ctx.restore();
+  if (index === 0) {
+    // The street lamp answers what the player did to it.
+    const [lu, lv] = STREET_LAMP,
+      red = e.lamp === 'red' ? 1 : e.lamp === 'red-to-dark' ? 1 - k : 0,
+      dark =
+        e.lamp === 'red-to-dark' ? k : e.lamp === 'relight' ? 1 - k : e.lamp === 'dark' ? 1 : 0;
+    ctx.save();
+    if (red > 0) {
+      ctx.globalCompositeOperation = 'multiply';
+      softLight(lu, lv, 0.05, '255,52,40', red);
+      ctx.globalCompositeOperation = 'screen';
+      softLight(lu, lv, 0.03, '255,40,24', 0.55 * red * (e.lamp === 'red' ? 1 + k * 0.5 : 1));
+    }
+    if (dark > 0) {
+      ctx.globalCompositeOperation = 'multiply';
+      softLight(lu, lv, 0.055, '22,25,30', 0.92 * dark);
+    }
+    ctx.restore();
+  }
+  weather(e.rain === 'heavier' ? 1 + k * 0.8 : Math.max(0, 1 - e.clock / 2.5));
+  ctx.fillStyle = '#020304';
+  ctx.fillRect(0, 0, W, H * 0.04);
+  ctx.fillRect(0, H * 0.94, W, H * 0.06);
+  const fade = Math.max(0, 1 - e.clock / 0.6, 1 - (e.duration - e.clock) / 0.8);
+  if (fade > 0) {
+    ctx.fillStyle = `rgba(2,3,4,${Math.min(1, fade)})`;
+    ctx.fillRect(0, 0, W, H);
   }
 }
 // Broadcast catch: the frame loses vertical hold for a moment and drains of colour. One
@@ -1485,15 +1639,16 @@ function render(now) {
   }
   if (ready) {
     const s = scenes[sceneIndex];
-    const cinematic = sceneIndex === 2 && insertShot(prediction);
-    $('#hud').classList.toggle('cinematic', cinematic);
-    if (cinematic) drawInsertShot();
+    const insert = sceneIndex === 2 && insertShot(prediction);
+    $('#hud').classList.toggle('cinematic', insert || mode === 'ending');
+    if (mode === 'ending' || (mode === 'end' && ending)) drawEnding();
+    else if (insert) drawInsertShot();
     else {
       ctx.drawImage(assets[s.id], 0, 0, W, H);
       environment();
       if (mode !== 'title') drawActor();
       drawMarker();
-      weather();
+      if (sceneIndex !== 2) weather();
     }
     drawPictureSkip();
     if (sceneIndex === 0 && broadcast.phase === 'live' && !reduced) {

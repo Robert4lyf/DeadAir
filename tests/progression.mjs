@@ -45,7 +45,80 @@ until(() => prediction.ready);
 use('microphone', () => mode === 'choice');
 assert.equal(document.querySelector('#decision').hidden, false);
 finish('silence');
-assert.equal(mode, 'end');
+assert.equal(mode, 'ending');
+assert.equal(ending.shot, 'plaza', 'Uncaught breaker route ends on the plaza');
+until(() => mode === 'end');
+assert.equal(document.querySelector('#ending').hidden, false);
+assert.equal(document.querySelector('#endingTitle').textContent, 'Dead air.');
+assert.match(document.querySelector('#endWeather').textContent, /silent/);
+`);
+});
+
+test('caught, resisted and speaking: the ending remembers all three', async () => {
+  const g = await bootGame();
+  g.run(`
+walkTo(-0.5, 13.6);
+until(() => recovering(broadcast));
+until(() => !recovering(broadcast));
+use('breaker', () => facts.breaker);
+use('crossing', () => sceneIndex === 1);
+until(() => mode === 'play');
+until(() => doorsOpen(plazaEvent) || (walkTo(0, 18), doorsOpen(plazaEvent)));
+use('doors', () => sceneIndex === 2);
+until(() => mode === 'play');
+use('monitor', () => prediction.phase === 'preview');
+until(() => prediction.phase === 'resolved');
+assert.equal(prediction.outcome, 'resisted');
+until(() => prediction.ready);
+use('microphone', () => mode === 'choice');
+finish('speak');
+assert.equal(ending.shot, 'street', 'The ending returns to where the tower caught you');
+assert.equal(ending.lamp, 'red');
+assert(ending.echo);
+until(() => mode === 'end');
+assert.match(document.querySelector('#endLine').textContent, /seven seconds late/);
+assert.match(document.querySelector('#endStreet').textContent, /red lamp that caught you/);
+`);
+});
+
+test('restart clears every sequence and consequence', async () => {
+  const g = await bootGame();
+  g.run(`
+walkTo(-0.5, 13.6);
+until(() => recovering(broadcast));
+until(() => !recovering(broadcast));
+use('breaker', () => facts.breaker);
+broadcast.attempts = 2;
+plazaEvent.phase = 'open';
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+interact('monitor');
+until(() => prediction.ready);
+use('microphone', () => mode === 'choice');
+finish('silence');
+until(() => mode === 'end');
+restart();
+assert.equal(mode, 'play');
+assert.equal(sceneIndex, 0);
+assert.equal(JSON.stringify(broadcast), JSON.stringify(createBroadcast()));
+assert.equal(JSON.stringify(prediction), JSON.stringify(createPrediction()));
+assert.equal(JSON.stringify(plazaEvent), JSON.stringify(createPlazaEvent()));
+assert.equal(
+  JSON.stringify(facts),
+  JSON.stringify({ notice: false, intercom: false, breaker: false, monitor: false }),
+);
+assert.equal(ending, null);
+assert.equal(player.x, scenes[0].spawn.x);
+assert.equal(player.z, scenes[0].spawn.z);
+assert.equal(path.length, 0);
+assert.equal(subtitleQueue.length, 0);
+assert.equal(document.querySelector('#ending').hidden, true);
+assert.equal(document.querySelector('#hud').hidden, false);
+assert(!controlLocked());
+// And the fresh run plays normally.
+walkTo(1.4, 13.4);
+until(() => broadcast.phase === 'clear');
+assert.equal(broadcast.resolution, 'sheltered');
 `);
 });
 
