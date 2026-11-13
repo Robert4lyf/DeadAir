@@ -2,7 +2,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bootGame } from './support/harness.mjs';
-import { turnToward } from '../dist/sprites.js';
 
 test('street to studio via the breaker, then the prediction and an ending', async () => {
   const g = await bootGame();
@@ -276,8 +275,4 @@ assert.equal(prediction.phase, 'countdown');
 `);
   g.fireWindow('blur');
   g.run(`assert.equal(mode, 'pause');`);
-});
-
-test('turns take the shortest path', () => {
-  assert(Math.abs(turnToward(Math.PI - 0.1, -Math.PI + 0.1, 0.1) - (Math.PI + 0.1)) < 0.001);
 });

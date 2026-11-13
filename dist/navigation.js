@@ -345,6 +345,15 @@ for (let s of scenes) {
       ],
     );
 }
+// How tall the character is in world units on a scene's floor (its calibration differs per
+// camera). Used to match the walk cycle to ground speed so feet do not slide.
+export function actorHeightUnits(scene) {
+  const z = Math.min(8, scene.length / 2),
+    d = project(scene.h, 0, z).d,
+    a = project(scene.h, -0.5, z),
+    b = project(scene.h, 0.5, z);
+  return (scene.nearHeight * 9) / d / Math.hypot((b.u - a.u) * 16, (b.v - a.v) * 9);
+}
 export function screenPoint(scene, x, z) {
   return project(scene.stairs && z > 20 ? scene.stairs : scene.h, x, z);
 }

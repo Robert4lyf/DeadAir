@@ -6,6 +6,7 @@ import {
   route,
   scenes,
   interactables,
+  actorHeightUnits,
 } from './navigation.js';
 import {
   createBroadcast,
@@ -126,8 +127,19 @@ function trapFocus(e) {
   }
 }
 function makePlayer(p, facing = 0) {
-  return { x: p.x, z: p.z, facing, desiredFacing: facing, phase: 0, moving: false, running: false };
+  return {
+    x: p.x,
+    z: p.z,
+    facing,
+    desiredFacing: facing,
+    phase: 0,
+    moving: false,
+    running: false,
+    stillFor: 1,
+  };
 }
+// One walk cycle (two steps) covers about one body height; a run cycle about 1.3.
+const strideUnits = scenes.map(actorHeightUnits);
 function resize() {
   let r = frame.getBoundingClientRect(),
     scale = Math.min(devicePixelRatio || 1, 1.5);
@@ -737,7 +749,7 @@ function move(dx, dz, dt) {
   if (player.moving) {
     player.desiredFacing = Math.atan2(p.u - old.u, -(p.v - old.v));
     let previous = player.phase;
-    player.phase += distance / (player.running ? 1.8 : 1.3);
+    player.phase += distance / ((player.running ? 1.3 : 1) * strideUnits[sceneIndex]);
     if (Math.floor(previous * 2) !== Math.floor(player.phase * 2)) {
       noise(
         sceneIndex === 2 ? 0.035 : 0.06,
@@ -972,6 +984,7 @@ function update(dt) {
       }
     } else move((dx / d) * Math.min(d, speed * dt), (dz / d) * Math.min(d, speed * dt), dt);
   } else player.facing = turnToward(player.facing, player.desiredFacing, dt);
+  player.stillFor = player.moving ? 0 : player.stillFor + dt;
   for (let event of updateBroadcast(broadcast, dt, player, sceneIndex)) encounterEvent(event);
   for (const event of updatePrediction(prediction, dt, player, sceneIndex === 2))
     predictionEvent(event);
@@ -1048,21 +1061,38 @@ function softLight(u, v, r, color, strength = 1) {
 }
 function lightingTone(s, p) {
   if (s.id === 'studio') return p.u > 0.57 ? 'warm' : 'shadow';
-  if (s.id === 'plaza') return player.z > 17 ? 'cool' : player.x < -3 ? 'warm' : 'neutral';
+  if (s.id === 'plaza')
+    return player.z > 17
+      ? doorsOpen(plazaEvent)
+        ? 'ember'
+        : 'cool'
+      : player.x < -3
+        ? 'warm'
+        : 'neutral';
   if (inShelter(player)) return 'shadow';
   if (player.z < 8) return 'warm';
   return player.z > 19 ? 'cool' : 'neutral';
 }
+// Standing height in canvas pixels: the scene's calibrated body height times the local
+// sideways scale. On flat floors this equals the depth-based size; on the plaza stairs, which
+// use their own projection, it keeps the figure in proportion to the doors.
+function actorHeightPx(s, index, x, z) {
+  const a = screenPoint(s, x - 0.5, z),
+    b = screenPoint(s, x + 0.5, z);
+  return strideUnits[index] * Math.hypot((b.u - a.u) * W, (b.v - a.v) * H);
+}
 function drawActor() {
   let s = scenes[sceneIndex],
     p = screenPoint(s, player.x, player.z),
-    depth = project(s.h, player.x, player.z).d,
-    height = (s.nearHeight * H) / depth,
+    height = actorHeightPx(s, sceneIndex, player.x, player.z),
     tone = lightingTone(s, p);
   ctx.save();
   groundClip(s);
-  if (s.id !== 'studio')
-    actor.draw(ctx, player, p.u * W, p.v * H, height, tone, time, { reflection: true });
+  // Wet streets reflect clearly; the studio's polished concrete only faintly.
+  actor.draw(ctx, player, p.u * W, p.v * H, height, tone, time, {
+    reflection: true,
+    alpha: s.id === 'studio' ? 0.045 : 0.07,
+  });
   ctx.restore();
   // A tight contact shadow stays with the boots, separate from the wet reflection.
   ctx.save();

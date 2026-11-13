@@ -1,75 +1,141 @@
-// Frame extraction and lighting happen once; gameplay draws cached cutouts, not
-// a brightness filter over the entire animation sheet on every frame.
+// Sprite sheets → cached, anchored cutouts.
+//
+// The sheets are not laid out consistently: within each walk row the figure drifts ~20% of a
+// cell sideways, run rows sit at different offsets, and every frame's bounding box has a
+// different height. Normalising each frame to its own box (as before) made the figure jitter
+// and pulse in size. Instead:
+//
+// - Every frame is anchored horizontally on its head-and-shoulders centroid and vertically on
+//   the ground: its lowest pixel for idle and walk (a foot is always planted), or the lowest
+//   point of its row for run (so airborne frames lift).
+// - Every sheet gets ONE pixel scale, from its standing height. Walk and run share a scale,
+//   because they are drawn at the same size (equal head widths).
+//
+// Frame extraction and tinting happen once; gameplay draws cached canvases.
+
+export const SHEETS = {
+  idle: { cols: 4, rows: 2, ground: 'frame', scale: 'idle' },
+  walk: { cols: 4, rows: 8, ground: 'frame', scale: 'walk' },
+  run: { cols: 4, rows: 8, ground: 'row', scale: 'walk' },
+};
+const OPAQUE = 110, // alpha that counts as the figure (ignores soft matte edges)
+  TORSO = 0.4, // top share of the figure used for the horizontal anchor
+  PAD = 3;
+
+// Pure: bounding box and head-and-shoulders centroid of one cell's alpha channel.
+export function measureFrame(alpha, width, height) {
+  let x0 = width,
+    y0 = height,
+    x1 = -1,
+    y1 = -1;
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++)
+      if (alpha[y * width + x] > OPAQUE) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+  if (x1 < 0) return { x0: 0, y0: 0, x1: width - 1, y1: height - 1, torsoX: width / 2 };
+  const limit = y0 + (y1 - y0) * TORSO;
+  let sum = 0,
+    count = 0;
+  for (let y = y0; y <= limit; y++)
+    for (let x = x0; x <= x1; x++)
+      if (alpha[y * width + x] > OPAQUE) {
+        sum += x;
+        count++;
+      }
+  return { x0, y0, x1, y1, torsoX: count ? sum / count : (x0 + x1) / 2 };
+}
+
+const percentile = (values, p) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * (sorted.length - 1)))];
+};
+
+// Pure: anchors and shared scale for a sheet, from per-frame measurements (row-major).
+export function anchorSheet(metrics, cols, ground) {
+  const frames = metrics.map((m, i) => {
+    let groundY = m.y1;
+    if (ground === 'row') {
+      const row = Math.floor(i / cols) * cols;
+      groundY = Math.max(...metrics.slice(row, row + cols).map((r) => r.y1));
+    }
+    return { ...m, groundY, height: groundY - m.y0 };
+  });
+  // Standing height: near the top of the range, so mid-stride dips stay dips.
+  return {
+    frames,
+    standing: percentile(
+      frames.map((f) => f.height),
+      0.85,
+    ),
+  };
+}
+
 export class SpriteActor {
   constructor(images) {
     this.frames = {};
+    this.standing = {};
     this.cache = new Map();
-    for (let [type, image] of Object.entries(images))
-      this.frames[type] = this.extract(image, type === 'idle' ? 4 : 4, type === 'idle' ? 2 : 8);
+    const measured = {};
+    for (const [type, image] of Object.entries(images)) {
+      const { cols, rows, ground } = SHEETS[type];
+      measured[type] = this.extract(image, cols, rows, ground);
+    }
+    for (const type of Object.keys(measured)) {
+      this.frames[type] = measured[type].frames;
+      this.standing[type] = measured[SHEETS[type].scale]?.standing ?? measured[type].standing;
+    }
   }
-  extract(image, cols, rows) {
-    const cellW = Math.ceil(image.width / cols),
-      cellH = Math.ceil(image.height / rows),
+  extract(image, cols, rows, ground) {
+    const edge = (n, size, count) => Math.round((n * size) / count),
+      maxW = edge(1, image.width, cols) + 1,
+      maxH = edge(1, image.height, rows) + 1,
       read = document.createElement('canvas');
-    read.width = cellW;
-    read.height = cellH;
+    read.width = maxW;
+    read.height = maxH;
     const c = read.getContext('2d', { willReadFrequently: true }),
-      out = [];
+      cells = [],
+      metrics = [];
     for (let row = 0; row < rows; row++)
       for (let col = 0; col < cols; col++) {
-        c.clearRect(0, 0, cellW, cellH);
-        c.drawImage(
-          image,
-          (col * image.width) / cols,
-          (row * image.height) / rows,
-          image.width / cols,
-          image.height / rows,
-          0,
-          0,
-          cellW,
-          cellH,
-        );
-        let data = c.getImageData(0, 0, cellW, cellH).data,
-          x0 = cellW,
-          y0 = cellH,
-          x1 = 0,
-          y1 = 0;
-        for (let y = 0; y < cellH; y++)
-          for (let x = 0; x < cellW; x++)
-            if (data[(y * cellW + x) * 4 + 3] > 110) {
-              x0 = Math.min(x0, x);
-              x1 = Math.max(x1, x);
-              y0 = Math.min(y0, y);
-              y1 = Math.max(y1, y);
-            }
-        if (x1 <= x0 || y1 <= y0) {
-          x0 = 0;
-          y0 = 0;
-          x1 = cellW - 1;
-          y1 = cellH - 1;
-        }
-        let pad = 3;
-        x0 = Math.max(0, x0 - pad);
-        y0 = Math.max(0, y0 - pad);
-        x1 = Math.min(cellW - 1, x1 + pad);
-        y1 = Math.min(cellH - 1, y1 + pad);
-        const frame = document.createElement('canvas');
-        frame.width = x1 - x0 + 1;
-        frame.height = y1 - y0 + 1;
+        // Integer cell edges: a 1:1 copy, no resampling and no bleed from neighbours.
+        const sx = edge(col, image.width, cols),
+          sy = edge(row, image.height, rows),
+          w = edge(col + 1, image.width, cols) - sx,
+          h = edge(row + 1, image.height, rows) - sy;
+        c.clearRect(0, 0, maxW, maxH);
+        c.drawImage(image, sx, sy, w, h, 0, 0, w, h);
+        const data = c.getImageData(0, 0, w, h).data,
+          alpha = new Uint8Array(w * h);
+        for (let i = 0; i < alpha.length; i++) alpha[i] = data[i * 4 + 3];
+        const m = measureFrame(alpha, w, h),
+          x0 = Math.max(0, m.x0 - PAD),
+          y0 = Math.max(0, m.y0 - PAD),
+          frame = document.createElement('canvas');
+        frame.width = Math.min(w - 1, m.x1 + PAD) - x0 + 1;
+        frame.height = Math.min(h - 1, m.y1 + PAD) - y0 + 1;
         frame
           .getContext('2d')
           .drawImage(read, x0, y0, frame.width, frame.height, 0, 0, frame.width, frame.height);
-        out.push({
-          image: frame,
-          footX: (cellW * 0.5 - x0) / frame.width,
-          footY: (y1 - 2 - y0) / frame.height,
-        });
+        cells.push({ image: frame, x0, y0 });
+        metrics.push(m);
       }
-    return out;
+    const sheet = anchorSheet(metrics, cols, ground);
+    sheet.frames = sheet.frames.map((f, i) => ({
+      image: cells[i].image,
+      anchorX: f.torsoX - cells[i].x0,
+      anchorY: f.groundY - cells[i].y0,
+    }));
+    return sheet;
   }
   pose(player) {
     const direction = ((Math.round(player.facing / (Math.PI / 4)) % 8) + 8) % 8,
-      type = player.moving ? (player.running ? 'run' : 'walk') : 'idle',
+      // A short hold keeps the stride from snapping to idle on one-frame stops.
+      moving = player.moving || player.stillFor < 0.12,
+      type = moving ? (player.running ? 'run' : 'walk') : 'idle',
       index = type === 'idle' ? direction : direction * 4 + (Math.floor(player.phase * 4) % 4);
     return { type, index, frame: this.frames[type][index] };
   }
@@ -85,34 +151,38 @@ export class SpriteActor {
     x.drawImage(frame.image, 0, 0);
     x.filter = 'none';
     x.globalCompositeOperation = 'source-atop';
-    x.fillStyle =
-      tone === 'warm'
-        ? 'rgba(231,159,89,.15)'
-        : tone === 'cool'
-          ? 'rgba(85,171,188,.16)'
-          : tone === 'shadow'
-            ? 'rgba(5,12,20,.26)'
-            : 'rgba(85,98,112,.07)';
+    x.fillStyle = TONES[tone] ?? TONES.neutral;
     x.fillRect(0, 0, c.width, c.height);
     this.cache.set(key, c);
     return c;
   }
-  draw(ctx, player, x, y, height, tone, time, { reflection = false } = {}) {
+  // `height` is the standing height in canvas pixels at the actor's depth.
+  draw(ctx, player, x, y, height, tone, time, { reflection = false, alpha = 0.07 } = {}) {
     const { type, index, frame } = this.pose(player),
       image = this.lit(type, index, tone),
-      breath = player.moving ? 1 : 1 + Math.sin(time * 1.5) * 0.003,
-      h = height * breath * (type === 'run' ? 0.96 : 1),
-      w = (h * image.width) / image.height;
-    ctx.save();
+      breath = type === 'idle' ? 1 + Math.sin(time * 1.5) * 0.003 : 1,
+      s = (height * breath) / this.standing[type],
+      w = image.width * s,
+      h = image.height * s,
+      ax = frame.anchorX * s,
+      ay = frame.anchorY * s;
     if (reflection) {
+      ctx.save();
       ctx.translate(x, y);
       ctx.scale(1, -0.23);
-      ctx.globalAlpha = 0.07;
-      ctx.drawImage(image, -w * frame.footX, -h * frame.footY, w, h);
-    } else ctx.drawImage(image, x - w * frame.footX, y - h * frame.footY, w, h);
-    ctx.restore();
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(image, -ax, -ay, w, h);
+      ctx.restore();
+    } else ctx.drawImage(image, x - ax, y - ay, w, h);
   }
 }
+const TONES = {
+  warm: 'rgba(231,159,89,.15)',
+  cool: 'rgba(85,171,188,.16)',
+  shadow: 'rgba(5,12,20,.26)',
+  ember: 'rgba(205,64,44,.16)',
+  neutral: 'rgba(85,98,112,.07)',
+};
 export function turnToward(current, target, dt) {
   let delta = ((target - current + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
   return current + Math.sign(delta) * Math.min(Math.abs(delta), dt * 9);
