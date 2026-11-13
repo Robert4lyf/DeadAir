@@ -47,6 +47,8 @@ npm test
 
 The tests cover navigation and perspective mapping, encounter rules, and progression through the studio ending. They do not replace visual and audio playtesting.
 
+Formatting uses Prettier: `npm run format` rewrites files and `npm run format:check` verifies them. CI runs both the tests and the format check on every pull request.
+
 ## Files
 
 | Path                                | Purpose                                                |
