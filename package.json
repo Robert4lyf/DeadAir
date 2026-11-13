@@ -7,7 +7,8 @@
   "scripts": {
     "test": "node --test tests/*.mjs",
     "format": "npx prettier@3.3.3 --write .",
-    "format:check": "npx prettier@3.3.3 --check ."
+    "format:check": "npx prettier@3.3.3 --check .",
+    "build:standalone": "node scripts/build-standalone.mjs"
   },
   "engines": {
     "node": ">=22"

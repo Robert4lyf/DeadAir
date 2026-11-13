@@ -4,9 +4,15 @@ A short third-person horror proof of concept set in a rain-soaked industrial noi
 
 [Play the hosted demo](https://dead-air-ps1-horror-9d98.slopedcrow2.chatgpt.site/) (requires access through ChatGPT).
 
+## Play from a single file
+
+Open [`dead-air.html`](dead-air.html) in a modern browser: download it (or clone the repository) and double-click it. It contains the whole game, with artwork embedded, and needs no server or install. Fonts load from Google Fonts when online and fall back to system fonts offline.
+
+`dead-air.html` is generated from `dist/`; after changing the game, run `npm run build:standalone` and commit the result. CI fails if it is out of date.
+
 ## Run locally
 
-The game is plain HTML, CSS, and JavaScript using Canvas 2D. No build step or dependencies are required. Serve `dist` over HTTP rather than opening the HTML file directly:
+The game is plain HTML, CSS, and JavaScript using Canvas 2D. To work on it, serve `dist` over HTTP (its HTML uses separate module and image files, which browsers block when opened directly):
 
 ```sh
 python -m http.server 8000 --directory dist
@@ -59,6 +65,8 @@ Formatting uses Prettier: `npm run format` rewrites files and `npm run format:ch
 | Path                                | Purpose                                                            |
 | ----------------------------------- | ------------------------------------------------------------------ |
 | `dist/index.html`, `dist/style.css` | Interface and layout                                               |
+| `dead-air.html`                     | Single-file build of the game (generated)                          |
+| `scripts/build-standalone.mjs`      | Builds `dead-air.html` from `dist/`                                |
 | `dist/game.js`                      | Rendering, input, HUD, audio, and wiring between the state modules |
 | `dist/navigation.js`                | Scene projections, routes, obstacles, and interactions             |
 | `dist/encounter.js`                 | Street broadcast: warning, catch recovery, holding, resolution     |

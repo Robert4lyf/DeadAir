@@ -174,7 +174,11 @@ async function load() {
     closeDialog('#error');
     $('#loading').hidden = false;
     const names = ['street', 'plaza', 'studio', 'idle', 'walk', 'run'];
-    let images = await Promise.all(names.map((n) => loadImage('./art/' + n + '.webp')));
+    // The standalone build (dead-air.html) inlines the artwork; the hosted site loads files.
+    const inlined = globalThis.DEAD_AIR_ART || {};
+    let images = await Promise.all(
+      names.map((n) => loadImage(inlined[n] || './art/' + n + '.webp')),
+    );
     names.forEach((n, i) => (assets[n] = images[i]));
     actor = new SpriteActor({ idle: assets.idle, walk: assets.walk, run: assets.run });
     ready = true;

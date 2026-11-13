@@ -15,3 +15,7 @@ jobs:
           node-version: 22
       - run: npm test
       - run: npm run format:check
+      - name: Standalone dead-air.html is up to date
+        run: |
+          npm run build:standalone
+          git diff --exit-code dead-air.html || (echo "Run npm run build:standalone and commit dead-air.html" && exit 1)
