@@ -430,12 +430,15 @@ export const interactables = [
     rect: null,
   },
   {
+    // `stand`: using it walks the player to this exact spot first, then acts on arrival.
+    // The prediction must always begin here, well clear of the tape mark.
     id: 'monitor',
     scene: 2,
     label: 'Watch the studio monitor',
     x: VIEW.x,
     z: VIEW.z,
     reach: 1.5,
+    stand: true,
     rect: [0.705, 0.345, 0.795, 0.47],
   },
   {

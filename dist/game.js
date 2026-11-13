@@ -450,6 +450,16 @@ function label(o) {
         : 'The boom microphone';
   return o.label;
 }
+const STAND_TOLERANCE = 0.12,
+  MONITOR_SCREEN = { u: 0.748, v: 0.405 };
+function atStandingSpot(o) {
+  return Math.hypot(player.x - o.x, player.z - o.z) <= STAND_TOLERANCE;
+}
+// Sprite facing (0 = up the screen) from the player toward a point in the frame.
+function facingToScreen(target) {
+  const p = screenPoint(scenes[sceneIndex], player.x, player.z);
+  return Math.atan2(target.u - p.u, -(target.v - p.v));
+}
 function interact(id = interaction?.id) {
   if (mode !== 'play' || !id || controlLocked()) return false;
   let object = interactables.find((o) => o.id === id);
@@ -507,7 +517,14 @@ function interact(id = interaction?.id) {
     changeScene(2);
   } else if (id === 'backPlaza') changeScene(1);
   else if (id === 'monitor') {
+    if (prediction.phase === 'idle' && !atStandingSpot(object)) {
+      // Walk to the viewing point first; the sequence starts when the player gets there.
+      path = route(scenes[2], player, object);
+      queuedAction = 'monitor';
+      return true;
+    }
     if (startPrediction(prediction, player)) {
+      player.desiredFacing = facingToScreen(MONITOR_SCREEN);
       facts.monitor = true;
       keys.clear();
       path = [];
@@ -966,7 +983,12 @@ function update(dt) {
   player.moving = false;
   if (queuedAction && !mx && !my) {
     let object = interactables.find((o) => o.id === queuedAction);
-    if (object && Math.hypot(player.x - object.x, player.z - object.z) < object.reach * 0.85) {
+    // Objects with a standing spot act only on arrival (end of the path), never early.
+    if (
+      object &&
+      !object.stand &&
+      Math.hypot(player.x - object.x, player.z - object.z) < object.reach * 0.85
+    ) {
       let action = queuedAction;
       queuedAction = null;
       path = [];
