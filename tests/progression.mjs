@@ -1,101 +1,12 @@
-import fs from 'node:fs';
-import vm from 'node:vm';
+// End-to-end progression through the real game loop (no rendering, no audio).
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import * as navigation from '../dist/navigation.js';
-import * as encounter from '../dist/encounter.js';
-import { turnToward } from '../dist/sprites.js';
-let nodes = new Map(),
-  gradient = { addColorStop() {} };
-const ctx = new Proxy(
-  { createRadialGradient: () => gradient },
-  { get: (o, k) => o[k] || (() => {}) },
-);
-// Elements that start hidden in index.html.
-const hiddenAtStart = [
-  '#hud',
-  '#modal',
-  '#decision',
-  '#ending',
-  '#error',
-  '#touch',
-  '#interaction',
-];
-function node(selector) {
-  return {
-    hidden: hiddenAtStart.includes(selector),
-    disabled: false,
-    style: {},
-    dataset: {},
-    innerHTML: '',
-    textContent: '',
-    addEventListener() {},
-    setAttribute() {},
-    focus() {},
-    closest: () => null,
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    isConnected: true,
-    getContext: () => ctx,
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1280, height: 720 }),
-  };
-}
-const document = {
-  querySelector(s) {
-    if (!nodes.has(s)) nodes.set(s, node(s));
-    return nodes.get(s);
-  },
-  activeElement: null,
-  addEventListener() {},
-};
-const sandbox = {
-  ...navigation,
-  ...encounter,
-  turnToward,
-  SpriteActor: class {
-    draw() {}
-  },
-  assert,
-  document,
-  window: {},
-  devicePixelRatio: 1,
-  matchMedia: () => ({ matches: false }),
-  addEventListener() {},
-  requestAnimationFrame() {},
-  performance,
-  console,
-  Image: class {
-    set src(v) {
-      queueMicrotask(() => this.onload());
-    }
-  },
-  Math,
-};
-vm.createContext(sandbox);
-const source = fs.readFileSync('dist/game.js', 'utf8').replace(/^import\b[^;]*;/gm, '');
-vm.runInContext(
-  source +
-    `
-ready = true;
-enter();
+import { bootGame } from './support/harness.mjs';
+
+test('street to studio via the breaker, then the prediction and an ending', async () => {
+  const g = await bootGame();
+  g.run(`
 assert.equal(mode, 'play');
-
-function until(predicate, n = 4000) {
-  for (let i = 0; i < n && !predicate(); i++) update(1 / 60);
-  assert(
-    predicate(),
-    'Journey timed out at scene ' + sceneIndex + ' phase ' + broadcast.phase +
-      ' position ' + player.x + ',' + player.z,
-  );
-}
-
-function use(id, predicate) {
-  const o = interactables.find((o) => o.id === id);
-  path = route(scenes[sceneIndex], player, o);
-  assert(path.length, 'Object must be reachable: ' + id);
-  queuedAction = id;
-  until(predicate);
-}
-
 assert.equal(interact('monitor'), false, 'Cannot use an object in another scene');
 use('notice', () => facts.notice);
 use('intercom', () => facts.intercom);
@@ -105,7 +16,6 @@ path = route(scenes[0], player, { x: 1.4, z: 14 });
 until(() => broadcast.phase === 'warning');
 assert.equal(path.length, 0);
 assert(broadcast.remaining > 4);
-assert.equal(mode, 'play');
 
 const remaining = broadcast.remaining;
 pause(true);
@@ -126,25 +36,243 @@ until(() => mode === 'play');
 update(1 / 60);
 assert.equal(interaction, null, 'The exit just used must not prompt on arrival');
 
-use('monitor', () => facts.monitor);
-for (let i = 0; i < 300; i++) update(1 / 60);
-assert(interact('monitor'));
-assert.equal(mode, 'choice');
+use('monitor', () => prediction.phase === 'preview');
+until(() => prediction.phase === 'countdown');
+use('microphone', () => prediction.phase === 'resolved');
+assert.equal(prediction.outcome, 'followed');
+until(() => prediction.ready);
+use('microphone', () => mode === 'choice');
 assert.equal(document.querySelector('#decision').hidden, false);
-
 finish('silence');
-assert.equal(mode, 'end');
+assert.equal(mode, 'ending');
+assert.equal(ending.shot, 'plaza', 'Uncaught breaker route ends on the plaza');
+until(() => mode === 'end');
 assert.equal(document.querySelector('#ending').hidden, false);
-assert(document.querySelector('#endLine').textContent.includes('remember'));
+assert.equal(document.querySelector('#endingTitle').textContent, 'Dead air.');
+assert.match(document.querySelector('#endWeather').textContent, /silent/);
+`);
+});
 
-console.log(
-  'PASS: notice, intercom, broadcast interruption, pause, breaker, both camera cuts, monitor and ending choice',
+test('caught, resisted and speaking: the ending remembers all three', async () => {
+  const g = await bootGame();
+  g.run(`
+walkTo(-0.5, 13.6);
+until(() => recovering(broadcast));
+until(() => !recovering(broadcast));
+use('breaker', () => facts.breaker);
+use('crossing', () => sceneIndex === 1);
+until(() => mode === 'play');
+until(() => doorsOpen(plazaEvent) || (walkTo(0, 18), doorsOpen(plazaEvent)));
+use('doors', () => sceneIndex === 2);
+until(() => mode === 'play');
+use('monitor', () => prediction.phase === 'preview');
+until(() => prediction.phase === 'resolved');
+assert.equal(prediction.outcome, 'resisted');
+until(() => prediction.ready);
+use('microphone', () => mode === 'choice');
+finish('speak');
+assert.equal(ending.shot, 'street', 'The ending returns to where the tower caught you');
+assert.equal(ending.lamp, 'red');
+assert(ending.echo);
+until(() => mode === 'end');
+assert.match(document.querySelector('#endLine').textContent, /seven seconds late/);
+assert.match(document.querySelector('#endStreet').textContent, /red lamp that caught you/);
+`);
+});
+
+test('restart clears every sequence and consequence', async () => {
+  const g = await bootGame();
+  g.run(`
+walkTo(-0.5, 13.6);
+until(() => recovering(broadcast));
+until(() => !recovering(broadcast));
+use('breaker', () => facts.breaker);
+broadcast.attempts = 2;
+plazaEvent.phase = 'open';
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+interact('monitor');
+until(() => prediction.ready);
+use('microphone', () => mode === 'choice');
+finish('silence');
+until(() => mode === 'end');
+restart();
+assert.equal(mode, 'play');
+assert.equal(sceneIndex, 0);
+assert.equal(JSON.stringify(broadcast), JSON.stringify(createBroadcast()));
+assert.equal(JSON.stringify(prediction), JSON.stringify(createPrediction()));
+assert.equal(JSON.stringify(plazaEvent), JSON.stringify(createPlazaEvent()));
+assert.equal(
+  JSON.stringify(facts),
+  JSON.stringify({ notice: false, intercom: false, breaker: false, monitor: false }),
 );
-`,
-  sandbox,
-  { timeout: 20000 },
-);
-assert(
-  Math.abs(turnToward(Math.PI - 0.1, -Math.PI + 0.1, 0.1) - (Math.PI + 0.1)) < 0.001,
-  'Turns take the shortest path',
-);
+assert.equal(ending, null);
+assert.equal(player.x, scenes[0].spawn.x);
+assert.equal(player.z, scenes[0].spawn.z);
+assert.equal(path.length, 0);
+assert.equal(subtitleQueue.length, 0);
+assert.equal(document.querySelector('#ending').hidden, true);
+assert.equal(document.querySelector('#hud').hidden, false);
+assert(!controlLocked());
+// And the fresh run plays normally.
+walkTo(1.4, 13.4);
+until(() => broadcast.phase === 'clear');
+assert.equal(broadcast.resolution, 'sheltered');
+`);
+});
+
+test('the shelter route: wait the transmission out under the awning', async () => {
+  const g = await bootGame();
+  g.run(`
+walkTo(1.4, 13.4);
+until(() => broadcast.phase === 'clear');
+assert.equal(broadcast.resolution, 'sheltered');
+assert.equal(broadcast.caught, false);
+use('crossing', () => sceneIndex === 1);
+`);
+});
+
+test('getting caught: a held picture skip, then the tower holds until the feed is cut', async () => {
+  const g = await bootGame();
+  g.run(`
+walkTo(-0.5, 13.6);
+until(() => broadcast.phase === 'live');
+assert(!inShelter(player));
+until(() => recovering(broadcast));
+assert(controlLocked(), 'Input is held during the picture skip');
+assert(inShelter(player), 'The skip lands the player in shelter');
+assert.equal(path.length, 0);
+keys.add('KeyA');
+const at = { x: player.x, z: player.z };
+step(0.5);
+assert.deepEqual({ x: player.x, z: player.z }, at, 'No movement during the skip');
+keys.clear();
+until(() => !recovering(broadcast));
+assert.equal(broadcast.attempts, 1, 'Exactly one catch');
+assert(broadcast.holding);
+step(20);
+assert.equal(broadcast.phase, 'live', 'Waiting no longer clears the transmission');
+assert(!interact('crossing') && sceneIndex === 0);
+use('breaker', () => facts.breaker);
+assert(inShelter(player), 'The breaker is reachable from cover');
+assert.equal(broadcast.resolution, 'cut');
+assert(broadcast.caught, 'The catch is remembered after the cut');
+use('crossing', () => sceneIndex === 1);
+`);
+});
+
+test('the plaza beat triggers once and survives backtracking', async () => {
+  const g = await bootGame();
+  g.run(`
+cutBroadcast(broadcast); // the street is already resolved
+goToScene(1);
+walkTo(-1.4, 10);
+assert.equal(plazaEvent.phase, 'anticipation');
+use('backStreet', () => sceneIndex === 0);
+until(() => mode === 'play');
+assert.equal(plazaEvent.phase, 'dormant', 'Leaving before the trigger resets it');
+use('crossing', () => sceneIndex === 1);
+until(() => mode === 'play');
+walkTo(0, 15);
+assert.equal(plazaEvent.phase, 'opening');
+let unlocks = 0;
+const original = plazaBeat;
+plazaBeat = (e) => (e === 'unlock' && unlocks++, original(e));
+assert(!interact('doors') || sceneIndex === 1);
+until(() => doorsOpen(plazaEvent));
+use('doors', () => sceneIndex === 2);
+until(() => mode === 'play');
+use('backPlaza', () => sceneIndex === 1);
+until(() => mode === 'play');
+walkTo(0, 10);
+walkTo(0, 18);
+step(5);
+assert.equal(unlocks, 0, 'The doors do not open a second time');
+assert(doorsOpen(plazaEvent));
+use('doors', () => sceneIndex === 2);
+`);
+});
+
+test('the prediction holds input during the preview, then resolves as followed', async () => {
+  const g = await bootGame();
+  g.run(`
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+assert(interact('monitor'));
+assert.equal(prediction.phase, 'preview');
+assert(controlLocked(), 'The insert shot holds the player');
+keys.add('KeyW');
+const before = { x: player.x, z: player.z };
+step(1);
+assert.deepEqual({ x: player.x, z: player.z }, before, 'No movement while the future plays');
+keys.clear();
+assert.equal(interact('monitor'), false, 'No interaction during the insert shot');
+until(() => prediction.phase === 'countdown');
+assert(!controlLocked());
+use('microphone', () => atMark(player));
+until(() => prediction.phase === 'resolved');
+assert.equal(prediction.outcome, 'followed');
+`);
+});
+
+test('standing still resists the prediction and still reaches the decision', async () => {
+  const g = await bootGame();
+  g.run(`
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+interact('monitor');
+until(() => prediction.phase === 'countdown');
+assert(!atMark(player), 'The viewing spot is off the mark');
+until(() => prediction.phase === 'resolved');
+assert.equal(prediction.outcome, 'resisted');
+until(() => prediction.ready);
+use('microphone', () => mode === 'choice');
+assert(document.querySelector('#decisionText').textContent.includes('other you'));
+`);
+});
+
+test('repeated monitor use never restarts or duplicates the sequence', async () => {
+  const g = await bootGame();
+  g.run(`
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+interact('monitor');
+until(() => prediction.phase === 'countdown');
+step(2);
+const clock = prediction.clock;
+assert(interact('monitor'));
+assert.equal(prediction.phase, 'countdown');
+assert.equal(prediction.clock, clock, 'Interacting again must not reset the deadline');
+until(() => prediction.phase === 'resolved');
+const outcome = prediction.outcome;
+interact('monitor');
+step(1);
+assert.equal(prediction.outcome, outcome);
+`);
+});
+
+test('pause and a hidden tab freeze the prediction deadline', async () => {
+  const g = await bootGame();
+  g.run(`
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+interact('monitor');
+until(() => prediction.phase === 'countdown');
+step(1.5);
+var left = predictionRemaining(prediction);
+pause(true);
+update(30);
+assert.equal(predictionRemaining(prediction), left, 'Pause freezes the deadline');
+pause(false);
+`);
+  g.document.hidden = true;
+  g.fireDocument('visibilitychange');
+  g.run(`
+assert.equal(mode, 'pause', 'Hiding the tab pauses');
+update(30);
+assert.equal(predictionRemaining(prediction), left, 'A hidden tab freezes the deadline');
+assert.equal(prediction.phase, 'countdown');
+`);
+  g.fireWindow('blur');
+  g.run(`assert.equal(mode, 'pause');`);
+});

@@ -1,3 +1,4 @@
+import { MARK, VIEW } from './prediction.js';
 // Perspective floor calibration and small navigation mesh, independent of rendering.
 export function homography(src, dst) {
   const a = [];
@@ -323,7 +324,7 @@ scenes.push({
       depth: 0.94,
     },
   ],
-  exit: { x: 0, z: 14.8 },
+  exit: { x: MARK.x, z: MARK.z },
   exitLabel: 'Use the mixing desk',
 });
 for (let s of scenes) {
@@ -343,6 +344,15 @@ for (let s of scenes) {
         [0.64, 0.572],
       ],
     );
+}
+// How tall the character is in world units on a scene's floor (its calibration differs per
+// camera). Used to match the walk cycle to ground speed so feet do not slide.
+export function actorHeightUnits(scene) {
+  const z = Math.min(8, scene.length / 2),
+    d = project(scene.h, 0, z).d,
+    a = project(scene.h, -0.5, z),
+    b = project(scene.h, 0.5, z);
+  return (scene.nearHeight * 9) / d / Math.hypot((b.u - a.u) * 16, (b.v - a.v) * 9);
 }
 export function screenPoint(scene, x, z) {
   return project(scene.stairs && z > 20 ? scene.stairs : scene.h, x, z);
@@ -390,7 +400,7 @@ export const interactables = [
     x: 0,
     z: 23.4,
     reach: 1.65,
-    rect: [0.55, 0.58, 0.67, 0.645],
+    rect: [0.55, 0.58, 0.645, 0.645],
   },
   {
     id: 'backStreet',
@@ -422,10 +432,20 @@ export const interactables = [
   {
     id: 'monitor',
     scene: 2,
-    label: 'Examine the studio monitor',
-    x: 0,
-    z: 14.8,
-    reach: 1.9,
-    rect: [0.64, 0.35, 0.83, 0.58],
+    label: 'Watch the studio monitor',
+    x: VIEW.x,
+    z: VIEW.z,
+    reach: 1.5,
+    rect: [0.705, 0.345, 0.795, 0.47],
+  },
+  {
+    // Reach stays inside the tape mark, so walking over to use it always lands on the mark.
+    id: 'microphone',
+    scene: 2,
+    label: 'Step up to the microphone',
+    x: MARK.x,
+    z: MARK.z,
+    reach: 0.95,
+    rect: [0.6, 0.29, 0.69, 0.47],
   },
 ];

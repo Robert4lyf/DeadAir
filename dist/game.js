@@ -6,6 +6,7 @@ import {
   route,
   scenes,
   interactables,
+  actorHeightUnits,
 } from './navigation.js';
 import {
   createBroadcast,
@@ -13,8 +14,32 @@ import {
   cutBroadcast,
   crossingOpen,
   inShelter,
+  recovering,
+  RECOVERY,
 } from './encounter.js';
 import { SpriteActor, turnToward } from './sprites.js';
+import {
+  createPrediction,
+  startPrediction,
+  updatePrediction,
+  controlHeld,
+  insertShot,
+  remaining as predictionRemaining,
+  feedFigure,
+  atMark,
+  MARK,
+  PREVIEW,
+  LEAD,
+  RESIST_INSERT,
+} from './prediction.js';
+import {
+  createPlazaEvent,
+  updatePlazaEvent,
+  leavePlaza,
+  doorOpenness,
+  doorsOpen,
+} from './plaza.js';
+import { composeEnding } from './ending.js';
 const elements = new Map(),
   $ = (s) => {
     if (!elements.has(s)) elements.set(s, document.querySelector(s));
@@ -23,8 +48,15 @@ const elements = new Map(),
   canvas = $('#scene'),
   ctx = canvas.getContext('2d', { alpha: false }),
   frame = $('#frame'),
-  reduced = matchMedia('(prefers-reduced-motion: reduce)').matches,
-  touch = matchMedia('(pointer:coarse)').matches;
+  reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Touch UI (labelled buttons instead of key hints). Hybrid devices switch on first touch.
+let touch = matchMedia('(pointer:coarse)').matches;
+function useTouch(on) {
+  touch = on;
+  frame.classList.toggle('touch', on);
+  if (mode === 'play') $('#touch').hidden = !on;
+}
+frame.classList.toggle('touch', touch);
 let W = 1280,
   H = 720,
   assets = {},
@@ -46,15 +78,18 @@ let W = 1280,
   transitionTarget = 1,
   transitionFrom = 0,
   transitionApplied = false,
-  subtitleUntil = 0,
-  subtitlePriority = 0,
   statusUntil = 0,
-  flashUntil = 0,
-  monitorAt = -1,
+  skipAt = -10, // when the last picture skip (broadcast catch) began
+  feedTearUntil = 0,
   arrivalGuard = null; // the exit just used; it gets no prompt until the player steps away
 let player = makePlayer(scenes[0].spawn),
   broadcast = createBroadcast(),
-  facts = { notice: false, intercom: false, breaker: false, monitor: false };
+  facts = { notice: false, intercom: false, breaker: false, monitor: false },
+  prediction = createPrediction(),
+  plazaEvent = createPlazaEvent(),
+  ending = null; // the closing sequence once the final choice is made
+// The figure on the studio monitor. Reused every frame and never aliased to the real player.
+const feedActor = makePlayer({ x: 0, z: 0 });
 // Per-frame HUD updates only touch the DOM when a value actually changes.
 function setText(selector, text) {
   const el = $(selector);
@@ -66,7 +101,8 @@ function setHidden(selector, hidden) {
 }
 // Dialogs take focus when they open, keep Tab inside, and hand focus back on close.
 const dialogs = ['#modal', '#decision', '#ending', '#error'];
-let dialogReturn = null;
+let dialogReturn = null,
+  dialogClosedAt = -1e9; // a tap that closes a dialog must not also walk the player
 function openDialog(selector) {
   const el = $(selector);
   if (!el.hidden) return;
@@ -78,6 +114,7 @@ function closeDialog(selector) {
   const el = $(selector);
   if (el.hidden) return;
   el.hidden = true;
+  dialogClosedAt = performance.now();
   if (dialogReturn?.isConnected && !dialogReturn.closest('[hidden]')) dialogReturn.focus();
   dialogReturn = null;
 }
@@ -99,8 +136,19 @@ function trapFocus(e) {
   }
 }
 function makePlayer(p, facing = 0) {
-  return { x: p.x, z: p.z, facing, desiredFacing: facing, phase: 0, moving: false, running: false };
+  return {
+    x: p.x,
+    z: p.z,
+    facing,
+    desiredFacing: facing,
+    phase: 0,
+    moving: false,
+    running: false,
+    stillFor: 1,
+  };
 }
+// One walk cycle (two steps) covers about one body height; a run cycle about 1.3.
+const strideUnits = scenes.map(actorHeightUnits);
 function resize() {
   let r = frame.getBoundingClientRect(),
     scale = Math.min(devicePixelRatio || 1, 1.5);
@@ -175,20 +223,23 @@ function makeAudio() {
     audio = null;
   }
 }
-function note(freq, duration = 0.15, gain = 0.07, type = 'sine') {
+function note(freq, duration = 0.15, gain = 0.07, type = 'sine', delay = 0) {
   if (!audio) return;
   let o = audio.createOscillator(),
-    g = audio.createGain();
+    g = audio.createGain(),
+    at = audio.currentTime + delay;
   o.type = type;
   o.frequency.value = freq;
-  g.gain.setValueAtTime(gain, audio.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + duration);
+  g.gain.setValueAtTime(0.0001, audio.currentTime);
+  g.gain.setValueAtTime(gain, at);
+  g.gain.exponentialRampToValueAtTime(0.001, at + duration);
   o.connect(g).connect(master);
-  o.start();
-  o.stop(audio.currentTime + duration);
+  o.start(at);
+  o.stop(at + duration);
 }
-function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900) {
+function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0) {
   if (!audio) return;
+  const at = audio.currentTime + delay;
   let n = audio.createBufferSource(),
     f = audio.createBiquadFilter(),
     g = audio.createGain(),
@@ -197,17 +248,61 @@ function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900) {
   f.type = 'lowpass';
   f.frequency.value = freq;
   p.pan.value = pan;
-  g.gain.setValueAtTime(gain, audio.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + duration);
+  g.gain.setValueAtTime(0.0001, audio.currentTime);
+  g.gain.setValueAtTime(gain, at);
+  g.gain.exponentialRampToValueAtTime(0.001, at + duration);
   n.connect(f).connect(g).connect(p).connect(master);
-  n.start();
-  n.stop(audio.currentTime + duration);
+  n.start(at);
+  n.stop(at + duration);
 }
-function say(text, seconds = 5, priority = 1) {
-  if (time < subtitleUntil && priority < subtitlePriority) return;
-  $('#subtitle').textContent = text;
-  subtitleUntil = time + seconds;
-  subtitlePriority = priority;
+// A horn-speaker voice: band-limited bursts in a speech-like rhythm, panned to the tower.
+function paVoice(words = 8, pan = 0.7, delay = 0, gain = 1) {
+  for (let i = 0; i < words; i++)
+    noise(
+      (0.05 + (i % 3) * 0.012) * gain,
+      0.16 + (i % 2) * 0.08,
+      pan,
+      1400 + (i % 4) * 260,
+      delay + i * 0.27,
+    );
+}
+// Subtitles: lower-priority lines wait their turn instead of being dropped, and text the
+// player asked for (by interacting) always shows at once. Important lines it interrupts resume.
+let subtitle = null;
+const subtitleQueue = [];
+function showSubtitle(entry) {
+  subtitle = entry;
+  entry.until = time + entry.seconds;
+  setText('#subtitle', entry.text);
+}
+function say(text, seconds = 5, priority = 1, requested = false) {
+  const entry = { text, seconds, priority, until: 0, expires: time + seconds + 6 },
+    active = subtitle && time < subtitle.until;
+  if (active && subtitle.text === text) return;
+  if (!active || requested || priority >= subtitle.priority) {
+    if (active && subtitle.priority >= 3 && subtitle.priority > priority) {
+      subtitle.seconds = Math.max(1.5, subtitle.until - time);
+      subtitle.expires = time + subtitle.seconds + 6;
+      subtitleQueue.unshift(subtitle);
+    }
+    showSubtitle(entry);
+  } else {
+    subtitleQueue.push(entry);
+    if (subtitleQueue.length > 3) subtitleQueue.shift();
+  }
+}
+// Text that answers a player's own action.
+function tell(text, seconds = 5, priority = 2) {
+  say(text, seconds, priority, true);
+}
+function advanceSubtitles() {
+  if (!subtitle || time < subtitle.until) return;
+  subtitle = null;
+  while (subtitleQueue.length) {
+    const next = subtitleQueue.shift();
+    if (time < next.expires) return showSubtitle(next);
+  }
+  setText('#subtitle', '');
 }
 function status(text, seconds = 2) {
   $('#status').textContent = text;
@@ -220,24 +315,40 @@ function setChapter() {
   updateObjective();
 }
 function updateObjective() {
-  setText('#objectiveLead', sceneIndex === 2 ? 'STUDIO' : 'REACH');
+  const studio = sceneIndex === 2,
+    ahead = prediction.phase === 'preview' || prediction.phase === 'countdown';
+  setText('#objectiveLead', studio ? 'STUDIO' : 'REACH');
   setText(
     '#objectiveTitle',
-    sceneIndex === 2 ? (facts.monitor ? 'THE MICROPHONE' : 'THE MONITOR') : 'STUDIO 001',
+    !studio
+      ? 'STUDIO 001'
+      : prediction.phase === 'idle'
+        ? 'THE MONITOR'
+        : ahead
+          ? 'THE TAPE MARK'
+          : 'THE MICROPHONE',
   );
   setText(
     '#distance',
-    sceneIndex === 2
-      ? facts.monitor
-        ? 'THE PICTURE IS SEVEN SECONDS AHEAD'
-        : 'LOOK AT THE LIVE PICTURE'
+    studio
+      ? prediction.phase === 'idle'
+        ? 'LOOK AT THE LIVE PICTURE'
+        : ahead
+          ? 'THE PICTURE IS SEVEN SECONDS AHEAD'
+          : prediction.outcome === 'followed'
+            ? 'THE PICTURE HAS CAUGHT UP'
+            : 'THE OTHER YOU IS STILL ON THE MONITOR'
       : sceneIndex === 1
-        ? 'CYAN DOORS / STUDIO 001'
+        ? doorsOpen(plazaEvent)
+          ? 'THE DOORS ARE OPEN / STUDIO 001'
+          : 'CYAN DOORS / STUDIO 001'
         : crossingOpen(broadcast)
           ? 'CROSSING OPEN / FOLLOW THE TOWER'
           : broadcast.phase === 'dormant'
             ? 'FOLLOW THE TOWER / INSPECT THE STREET'
-            : 'FIND COVER OR CUT THE SERVICE FEED',
+            : broadcast.holding
+              ? 'THE TOWER IS HOLDING ON YOU / CUT THE SERVICE FEED'
+              : 'FIND COVER OR CUT THE SERVICE FEED',
   );
 }
 function enter() {
@@ -259,6 +370,7 @@ function pause(show = true) {
   if (audio) master.gain.setTargetAtTime(show || muted ? 0 : 0.42, audio.currentTime, 0.1);
 }
 function changeScene(next) {
+  if (sceneIndex === 1) leavePlaza(plazaEvent);
   mode = 'transition';
   transitionTarget = next;
   transitionFrom = sceneIndex;
@@ -321,12 +433,21 @@ function nearby() {
 function label(o) {
   if (o.id === 'breaker' && facts.breaker) return 'Service feed isolated';
   if (o.id === 'crossing' && !crossingOpen(broadcast)) return 'Crossing signal red';
+  if (o.id === 'doors' && !doorsOpen(plazaEvent)) return 'The doors are opening';
   if (o.id === 'monitor')
-    return facts.monitor ? 'Take the microphone' : 'Examine the studio monitor';
+    return prediction.phase === 'idle' || prediction.phase === 'resolved'
+      ? 'Watch the studio monitor'
+      : 'The picture is ahead of you';
+  if (o.id === 'microphone')
+    return prediction.ready
+      ? 'Take the microphone'
+      : prediction.phase === 'countdown'
+        ? 'Step up to the microphone'
+        : 'The boom microphone';
   return o.label;
 }
 function interact(id = interaction?.id) {
-  if (mode !== 'play' || !id) return false;
+  if (mode !== 'play' || !id || controlLocked()) return false;
   let object = interactables.find((o) => o.id === id);
   if (
     !object ||
@@ -336,14 +457,14 @@ function interact(id = interaction?.id) {
     return false;
   if (id === 'notice') {
     facts.notice = true;
-    say(
+    tell(
       'CURFEW NOTICE: During live transmission, shelter beneath the shop awnings. Service breakers isolate the signal.',
       8,
     );
     noise(0.02, 0.2, 0.6);
   } else if (id === 'intercom') {
     facts.intercom = true;
-    say('INTERCOM: “At the crossing, you will run. You will not reach the light.”', 7, 2);
+    tell('INTERCOM: “At the crossing, you will run. You will not reach the light.”', 7);
     noise(0.11, 1.5, 0.65, 1300);
   } else if (id === 'breaker') {
     if (!facts.breaker) {
@@ -352,15 +473,18 @@ function interact(id = interaction?.id) {
       path = [];
       queuedAction = null;
       noise(0.12, 0.35, 0.7, 220);
-      say(
-        'The service feed is cut. The crossing unlocks. Something in the speaker keeps breathing.',
+      if (audio) humGain.gain.setTargetAtTime(0.008, audio.currentTime, 0.3);
+      tell(
+        broadcast.caught
+          ? 'You pull the breaker. The transmission drops mid-word, but the red lamp stays lit. Somewhere, the tower kept your picture.'
+          : 'You pull the breaker. The speaker dies mid-word and the street lamp goes out. The crossing unlocks.',
         7,
-        3,
+        5,
       );
-    } else say('The breaker is off. The crossing is open.');
+    } else tell('The breaker is off. The crossing is open.');
   } else if (id === 'crossing') {
     if (!crossingOpen(broadcast)) {
-      say(
+      tell(
         broadcast.phase === 'dormant'
           ? 'The crossing is locked to the broadcast. Look for the service breaker.'
           : 'The crossing is locked while the tower transmits. Shelter under the awning or cut the service feed.',
@@ -371,41 +495,138 @@ function interact(id = interaction?.id) {
     }
     changeScene(1);
   } else if (id === 'backStreet') changeScene(0);
-  else if (id === 'doors') changeScene(2);
-  else if (id === 'backPlaza') changeScene(1);
+  else if (id === 'doors') {
+    if (!doorsOpen(plazaEvent)) {
+      tell('The doors are still sliding open.', 2);
+      return false;
+    }
+    changeScene(2);
+  } else if (id === 'backPlaza') changeScene(1);
   else if (id === 'monitor') {
-    if (!facts.monitor) {
+    if (startPrediction(prediction, player)) {
       facts.monitor = true;
-      monitorAt = time;
+      keys.clear();
+      path = [];
+      queuedAction = null;
+      player.moving = false;
       noise(0.065, 1.2, -0.3, 1800);
-      say('The monitor shows you at this desk. The timestamp is seven seconds ahead.', 7, 2);
-    } else if (time - monitorAt < 4) {
-      say('On the monitor, you reach for the microphone before you move.', 4, 2);
-    } else {
+      tell(
+        'The picture jumps. On the monitor, the studio is seven seconds ahead of you.',
+        PREVIEW,
+        4,
+      );
+    } else if (prediction.phase === 'countdown')
+      tell('On the monitor, you are already standing at the microphone.', 3);
+    else if (prediction.phase === 'resolved')
+      tell(
+        prediction.outcome === 'followed'
+          ? 'The picture and the room agree now. There is no delay.'
+          : 'On the monitor, you are still at the microphone, looking out at yourself.',
+        4,
+      );
+  } else if (id === 'microphone') {
+    if (prediction.ready) {
       mode = 'choice';
       keys.clear();
       path = [];
+      $('#decisionText').textContent =
+        prediction.outcome === 'followed'
+          ? 'The monitor and the room agree. Your hand is already on the microphone.'
+          : 'On the monitor, the other you is still at the microphone, waiting to hear what you will do.';
       openDialog('#decision');
-    }
+    } else if (prediction.phase === 'idle')
+      tell('The microphone is cold. On the monitor, the room is moving.', 4);
+    else if (prediction.phase === 'countdown') {
+      // Step the last half-metre onto the tape, so the room matches the picture.
+      if (!atMark(player) || Math.hypot(player.x - MARK.x, player.z - MARK.z) > 0.2)
+        path = route(scenes[2], player, MARK);
+      tell(
+        'You step onto the tape mark and reach for the microphone. On the monitor, you already have.',
+        3,
+      );
+    } else if (prediction.phase === 'resolved') tell('The picture is still settling.', 2);
   }
   updateObjective();
   return true;
 }
+// The final choice plays out in-engine before the card: a cut to the place that remembers
+// the player, with the tower, the rain and the street lamp answering what they chose.
 function finish(choice) {
-  mode = 'end';
+  if (mode !== 'choice') return;
   closeDialog('#decision');
-  $('#hud').hidden = true;
+  ending = {
+    clock: 0,
+    ...composeEnding({
+      choice,
+      outcome: prediction.outcome,
+      caught: broadcast.caught,
+      cut: broadcast.resolution === 'cut',
+    }),
+  };
+  mode = 'ending';
+  keys.clear();
+  path = [];
   $('#touch').hidden = true;
+  subtitleQueue.length = 0;
+  say(ending.caption, ending.duration, 9);
+  if (!audio) return;
+  const now = audio.currentTime;
+  if (choice === 'speak') {
+    rainGain.gain.setTargetAtTime(0.22, now, 1.2);
+    humGain.gain.setTargetAtTime(0.1, now, 1);
+    paVoice(10, 0);
+    if (ending.echo) paVoice(10, -0.5, 1.9, 0.7);
+    [147, 220, 294, 370].forEach((f, i) => note(f, 3.6 - i * 0.3, 0.035, 'triangle', i * 0.35));
+  } else {
+    // Dead air: everything falls away and stays away for the full seven seconds.
+    rainGain.gain.setTargetAtTime(0, now, 0.7);
+    humGain.gain.setTargetAtTime(0, now, 0.5);
+    note(144, 0.4, 0.05);
+  }
+}
+function showEndingCard() {
+  mode = 'end';
+  $('#hud').hidden = true;
+  $('#endingTitle').textContent = ending.title;
+  $('#endLine').textContent = ending.motif;
+  $('#endStreet').textContent = ending.street;
+  $('#endWeather').textContent = ending.weather;
   openDialog('#ending');
-  $('#endLine').textContent =
-    choice === 'speak'
-      ? 'The speakers answer before your lips move. Your voice: “You never left the studio.”'
-      : 'You say nothing. The microphone speaks in your voice. “Good. You remember this time.”';
-  note(144, 2, 0.07);
-  noise(0.04, 1, 0, 600);
+}
+// Back to the start of the street with every sequence and consequence reset; no reload.
+function restart() {
+  closeDialog('#ending');
+  closeDialog('#decision');
+  facts = { notice: false, intercom: false, breaker: false, monitor: false };
+  broadcast = createBroadcast();
+  prediction = createPrediction();
+  plazaEvent = createPlazaEvent();
+  ending = null;
+  sceneIndex = 0;
+  player = makePlayer(scenes[0].spawn);
+  path = [];
+  queuedAction = null;
+  keys.clear();
+  interaction = null;
+  hovered = null;
+  marker = null;
+  arrivalGuard = null;
+  skipAt = -10;
+  feedTearUntil = 0;
+  statusUntil = 0;
+  subtitle = null;
+  subtitleQueue.length = 0;
+  setText('#subtitle', '');
+  $('#fade').style.opacity = '0';
+  if (audio) {
+    rainGain.gain.setTargetAtTime(0.11, audio.currentTime, 0.5);
+    humGain.gain.setTargetAtTime(0.04, audio.currentTime, 0.5);
+  }
+  enter();
 }
 function toggleTorch() {
   torch = !torch;
+  $('#touchTorch').setAttribute('aria-pressed', String(torch));
   status(torch ? 'TORCH ON' : 'TORCH OFF');
   note(180, 0.04, 0.035);
 }
@@ -425,8 +646,8 @@ $('#sound').onclick = () => {
   if (audio)
     master.gain.setTargetAtTime(muted || mode === 'pause' ? 0 : 0.42, audio.currentTime, 0.1);
 };
-$('#restart').onclick = () => location.reload();
-$('#touchAction').onclick = () => interact();
+$('#restart').onclick = restart;
+$('#interaction').onclick = () => interact();
 $('#touchTorch').onclick = toggleTorch;
 $('#speak').onclick = () => finish('speak');
 $('#silence').onclick = () => finish('silence');
@@ -477,16 +698,23 @@ function pointer(e) {
   let r = canvas.getBoundingClientRect();
   return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height };
 }
-function objectAt(u, v) {
-  return interactables.find(
-    (o) =>
-      o.scene === sceneIndex &&
-      o.rect &&
-      u >= o.rect[0] &&
-      u <= o.rect[2] &&
-      v >= o.rect[1] &&
-      v <= o.rect[3],
-  );
+// Small world objects get a forgiving hit area (in CSS pixels); the nearest object wins, so
+// padded areas never make a tap ambiguous.
+function objectAt(u, v, pad = 4) {
+  const r = canvas.getBoundingClientRect();
+  let best = null,
+    bestDistance = Infinity;
+  for (const o of interactables) {
+    if (o.scene !== sceneIndex || !o.rect) continue;
+    const dx = Math.max(o.rect[0] - u, 0, u - o.rect[2]) * r.width,
+      dy = Math.max(o.rect[1] - v, 0, v - o.rect[3]) * r.height,
+      d = Math.hypot(dx, dy);
+    if (d <= pad && d < bestDistance) {
+      best = o;
+      bestDistance = d;
+    }
+  }
+  return best;
 }
 canvas.addEventListener('pointermove', (e) => {
   if (mode !== 'play') return;
@@ -506,9 +734,10 @@ canvas.addEventListener('pointerleave', () => {
   $('#hoverHint').textContent = '';
 });
 canvas.addEventListener('pointerdown', (e) => {
-  if (mode !== 'play') return;
+  if (e.pointerType === 'touch' && !touch) useTouch(true);
+  if (mode !== 'play' || controlLocked() || performance.now() - dialogClosedAt < 400) return;
   let { u, v } = pointer(e),
-    o = objectAt(u, v),
+    o = objectAt(u, v, e.pointerType === 'touch' ? 22 : 4),
     s = scenes[sceneIndex],
     p = o ? { x: o.x, z: o.z } : groundPoint(s, u, v);
   if (!p || blocked(s, p.x, p.z)) {
@@ -538,7 +767,7 @@ function move(dx, dz, dt) {
   if (player.moving) {
     player.desiredFacing = Math.atan2(p.u - old.u, -(p.v - old.v));
     let previous = player.phase;
-    player.phase += distance / (player.running ? 1.8 : 1.3);
+    player.phase += distance / ((player.running ? 1.3 : 1) * strideUnits[sceneIndex]);
     if (Math.floor(previous * 2) !== Math.floor(player.phase * 2)) {
       noise(
         sceneIndex === 2 ? 0.035 : 0.06,
@@ -565,23 +794,112 @@ function encounterEvent(event) {
     say('ON AIR. Stay beneath the awning. The open crossing is listening.', 4, 4);
     note(54, 0.8, 0.12, 'sawtooth');
   } else if (event === 'caught') {
+    // The picture skips: input is held while the frame rolls, and the player lands in shelter.
     player.x = 1.4;
     player.z = 13.3;
     player.moving = false;
     keys.clear();
     path = [];
     queuedAction = null;
-    flashUntil = time + 0.6;
+    skipAt = time;
+    say('The picture skips.', RECOVERY, 5);
+    noise(0.16, 0.6, 0, 1200);
+    note(110, RECOVERY, 0.06, 'sawtooth');
+  } else if (event === 'recovered') {
     say(
-      'The picture skips. You are back beneath the awning. Wait for the transmission to pass.',
+      broadcast.attempts > 1
+        ? 'Back under the awning again. The tower is holding on you. The breaker is at the far end of this awning.'
+        : 'You are back under the awning, and the street lamp has turned red. The tower has your picture now; it will not pass on its own. Cut the service feed: the breaker is at the far end of this awning.',
+      9,
+      5,
+    );
+  } else if (event === 'clear') {
+    say(
+      'The transmission passes over the awning. The speaker clicks: “Thank you for listening.” The crossing signal changes.',
       6,
       4,
     );
-    noise(0.16, 0.6, 0, 1200);
-  } else if (event === 'clear') {
-    say('The speaker falls silent. The crossing signal changes. You can go.', 5, 4);
-    note(320, 0.25, 0.04);
+    note(392, 0.3, 0.04);
+    note(294, 0.5, 0.035);
   }
+  updateObjective();
+}
+function plazaBeat(event) {
+  if (event === 'anticipate') {
+    say('A horn speaker on the tower crackles: “Door opening for our guest.”', 6, 4);
+    noise(0.07, 0.5, 0.75, 2600);
+    paVoice(6);
+    if (audio) humGain.gain.setTargetAtTime(0.13, audio.currentTime, 1.5);
+  } else if (event === 'unlock') {
+    say(
+      'A lock releases. The studio doors slide open on their own. You are nowhere near them.',
+      6,
+      5,
+    );
+    noise(0.16, 0.18, 0.2, 260);
+    note(62, 0.5, 0.1, 'triangle');
+    noise(0.06, 1.8, 0.2, 2400, 0.4);
+  } else if (event === 'announce') {
+    say(
+      broadcast.caught
+        ? '“Welcome back to Studio 001. We kept your picture from the side street.”'
+        : broadcast.resolution === 'cut'
+          ? '“Welcome back to Studio 001. Someone cut the feed on the side street. We had other ways to listen.”'
+          : '“Welcome back to Studio 001. You waited under the awning, just as we said you would.”',
+      7,
+      5,
+    );
+    paVoice(11);
+  } else if (event === 'settled') {
+    if (audio) humGain.gain.setTargetAtTime(0.085, audio.currentTime, 2);
+  }
+  updateObjective();
+}
+// While a sequence holds the player (the monitor insert shot), input is ignored.
+function controlLocked() {
+  return (
+    (sceneIndex === 2 && controlHeld(prediction)) || (sceneIndex === 0 && recovering(broadcast))
+  );
+}
+function predictionEvent(event) {
+  const here = sceneIndex === 2;
+  if (event === 'released') {
+    say(
+      'The picture is seven seconds ahead. On it, you are standing on the tape mark at the microphone. Go to it, or stay where you are.',
+      LEAD,
+      5,
+    );
+    noise(0.05, 0.25, 0.3, 2400);
+  } else if (event === 'tick') {
+    note(620 + prediction.lastTick * 45, 0.05, 0.05, 'square');
+  } else if (event === 'followed') {
+    say(
+      'The picture catches up with you. On the monitor and in the room, your hand is on the microphone.',
+      6,
+      5,
+    );
+    for (const f of [220, 277, 330]) note(f, 2.6, 0.04);
+  } else if (event === 'resisted') {
+    say(
+      here
+        ? 'You stay where you are. On the monitor, you take the microphone anyway. Then the figure on the screen turns and looks at you.'
+        : 'Behind you, in Studio 001, a microphone switches on without you.',
+      7,
+      5,
+    );
+    noise(0.14, 1.1, -0.3, 3200);
+    note(49, 2.5, 0.08, 'sawtooth');
+    feedTearUntil = time + 1.2;
+  } else if (event === 'ready' && here) {
+    say(
+      prediction.outcome === 'followed'
+        ? 'The microphone is live. It is waiting for you.'
+        : 'The microphone is waiting for you.',
+      5,
+      2,
+    );
+  }
+  updateObjective();
 }
 function update(dt) {
   if (mode === 'transition') {
@@ -605,29 +923,42 @@ function update(dt) {
     }
     return;
   }
+  if (mode === 'ending') {
+    time += dt;
+    ending.clock += dt;
+    advanceSubtitles();
+    if (ending.clock >= ending.duration) showEndingCard();
+    return;
+  }
   if (mode !== 'play') return;
   time += dt;
-  if (time > subtitleUntil) {
-    setText('#subtitle', '');
-    subtitlePriority = 0;
-  }
+  advanceSubtitles();
   if (time > statusUntil)
     setText(
       '#status',
       sceneIndex === 2
         ? 'STUDIO / LIVE'
-        : broadcast.phase === 'live'
-          ? 'TRANSMITTING'
-          : 'SIGNAL DETECTED',
+        : broadcast.holding
+          ? 'HOLDING'
+          : broadcast.phase === 'live'
+            ? 'TRANSMITTING'
+            : 'SIGNAL DETECTED',
     );
-  player.running = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const locked = controlLocked();
+  if (locked) {
+    path = [];
+    queuedAction = null;
+  }
+  player.running = !locked && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
   let speed = player.running ? 3.9 : 2.35,
-    mx =
-      (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) -
-      (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0),
-    my =
-      (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) -
-      (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0);
+    mx = locked
+      ? 0
+      : (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) -
+        (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0),
+    my = locked
+      ? 0
+      : (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) -
+        (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0);
   player.moving = false;
   if (queuedAction && !mx && !my) {
     let object = interactables.find((o) => o.id === queuedAction);
@@ -671,8 +1002,14 @@ function update(dt) {
       }
     } else move((dx / d) * Math.min(d, speed * dt), (dz / d) * Math.min(d, speed * dt), dt);
   } else player.facing = turnToward(player.facing, player.desiredFacing, dt);
+  player.stillFor = player.moving ? 0 : player.stillFor + dt;
   for (let event of updateBroadcast(broadcast, dt, player, sceneIndex)) encounterEvent(event);
-  interaction = nearby();
+  for (const event of updatePrediction(prediction, dt, player, sceneIndex === 2))
+    predictionEvent(event);
+  if (sceneIndex === 1)
+    for (const event of updatePlazaEvent(plazaEvent, dt, player)) plazaBeat(event);
+  if (mode !== 'play') return;
+  interaction = controlLocked() ? null : nearby();
   let hoverObject = interactables.find((o) => o.id === hovered && o.scene === sceneIndex);
   setText(
     '#hoverHint',
@@ -680,18 +1017,34 @@ function update(dt) {
   );
   setHidden('#interaction', !interaction);
   if (interaction) setText('#interaction span', label(interaction));
-  let danger = sceneIndex === 0 && ['warning', 'live'].includes(broadcast.phase);
-  setHidden('#broadcastPanel', !danger);
-  if (danger) {
+  let danger = sceneIndex === 0 && ['warning', 'live'].includes(broadcast.phase),
+    forecast = sceneIndex === 2 && prediction.phase === 'countdown';
+  setHidden('#broadcastPanel', !danger && !forecast);
+  if (forecast) {
+    setText(
+      '#broadcastTimer',
+      'SEVEN SECONDS AHEAD / ' + Math.ceil(predictionRemaining(prediction)),
+    );
+    setText(
+      '#broadcastHelp',
+      atMark(player) ? 'YOU ARE ON THE TAPE MARK' : 'THE MONITOR SHOWS YOU AT THE MICROPHONE',
+    );
+  } else if (danger) {
     setText(
       '#broadcastTimer',
       broadcast.phase === 'warning'
         ? 'TRANSMISSION IN ' + Math.ceil(broadcast.remaining)
-        : 'ON AIR / ' + Math.ceil(broadcast.remaining),
+        : broadcast.holding
+          ? 'ON AIR / HOLDING ON YOU'
+          : 'ON AIR / ' + Math.ceil(broadcast.remaining),
     );
     setText(
       '#broadcastHelp',
-      inShelter(player) ? 'IN SHADOW / STAY HERE' : 'RIGHT-HAND AWNING OR SERVICE BREAKER',
+      broadcast.holding
+        ? 'CUT THE FEED: BREAKER AT THE END OF THIS AWNING'
+        : inShelter(player)
+          ? 'IN SHADOW / STAY HERE'
+          : 'RIGHT-HAND AWNING OR SERVICE BREAKER',
     );
   }
   updateObjective();
@@ -726,21 +1079,38 @@ function softLight(u, v, r, color, strength = 1) {
 }
 function lightingTone(s, p) {
   if (s.id === 'studio') return p.u > 0.57 ? 'warm' : 'shadow';
-  if (s.id === 'plaza') return player.z > 17 ? 'cool' : player.x < -3 ? 'warm' : 'neutral';
+  if (s.id === 'plaza')
+    return player.z > 17
+      ? doorsOpen(plazaEvent)
+        ? 'ember'
+        : 'cool'
+      : player.x < -3
+        ? 'warm'
+        : 'neutral';
   if (inShelter(player)) return 'shadow';
   if (player.z < 8) return 'warm';
   return player.z > 19 ? 'cool' : 'neutral';
 }
+// Standing height in canvas pixels: the scene's calibrated body height times the local
+// sideways scale. On flat floors this equals the depth-based size; on the plaza stairs, which
+// use their own projection, it keeps the figure in proportion to the doors.
+function actorHeightPx(s, index, x, z) {
+  const a = screenPoint(s, x - 0.5, z),
+    b = screenPoint(s, x + 0.5, z);
+  return strideUnits[index] * Math.hypot((b.u - a.u) * W, (b.v - a.v) * H);
+}
 function drawActor() {
   let s = scenes[sceneIndex],
     p = screenPoint(s, player.x, player.z),
-    depth = project(s.h, player.x, player.z).d,
-    height = (s.nearHeight * H) / depth,
+    height = actorHeightPx(s, sceneIndex, player.x, player.z),
     tone = lightingTone(s, p);
   ctx.save();
   groundClip(s);
-  if (s.id !== 'studio')
-    actor.draw(ctx, player, p.u * W, p.v * H, height, tone, time, { reflection: true });
+  // Wet streets reflect clearly; the studio's polished concrete only faintly.
+  actor.draw(ctx, player, p.u * W, p.v * H, height, tone, time, {
+    reflection: true,
+    alpha: s.id === 'studio' ? 0.045 : 0.07,
+  });
   ctx.restore();
   // A tight contact shadow stays with the boots, separate from the wet reflection.
   ctx.save();
@@ -838,11 +1208,37 @@ function drawStreetProps() {
     ctx.lineTo(0.643 * W, 0.623 * H);
     ctx.stroke();
   }
+  // The street lamp records how the broadcast ended: red if it caught the player (for the
+  // rest of the game), dark if the feed was cut, humming while the transmission runs.
+  if (broadcast.caught) {
+    // Multiply first so the near-white lamp actually turns red, then let it glow.
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    softLight(0.402, 0.392, 0.05, '255,52,40', 1);
+    ctx.globalCompositeOperation = 'screen';
+    softLight(0.402, 0.392, 0.028, '255,40,24', reduced ? 0.55 : 0.45 + Math.sin(time * 1.3) * 0.1);
+    softLight(0.4, 0.46, 0.13, '200,40,24', 0.09);
+    ctx.restore();
+  } else if (broadcast.resolution === 'cut') {
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    softLight(0.402, 0.392, 0.055, '22,25,30', 0.92);
+    softLight(0.4, 0.46, 0.12, '60,64,72', 0.5);
+    ctx.restore();
+  }
   if (['warning', 'live'].includes(broadcast.phase) && !reduced) {
     ctx.save();
     ctx.globalCompositeOperation = 'screen';
     let amount = 0.05 + Math.max(0, Math.sin(time * 5)) * 0.07;
     softLight(0.404, 0.449, 0.08, '225,156,83', amount);
+    ctx.restore();
+  }
+  if (broadcast.holding && !recovering(broadcast)) {
+    // Point at the way out: the breaker panel pulses at the far end of the awning.
+    ctx.save();
+    ctx.strokeStyle = `rgba(230,180,110,${reduced ? 0.8 : 0.45 + Math.sin(time * 4) * 0.35})`;
+    ctx.lineWidth = Math.max(1.5, W / 800);
+    ctx.strokeRect(0.651 * W, 0.598 * H, 0.032 * W, 0.046 * H);
     ctx.restore();
   }
   if (facts.breaker) {
@@ -874,39 +1270,236 @@ function drawStreetProps() {
     ctx.stroke();
   }
 }
-function drawMonitor() {
-  // The CRT picture is clipped to the physical glass in the background.
-  ctx.save();
-  polygon([
+// The studio monitor is a CCTV feed of this room, framed on the desk. It shows the present
+// until the player examines it; then it runs seven seconds ahead (see prediction.js).
+const GLASS = [
     [0.719, 0.364],
     [0.777, 0.37],
     [0.776, 0.447],
     [0.719, 0.443],
-  ]);
-  ctx.clip();
-  let x = 0.716 * W,
-    y = 0.36 * H,
-    w = 0.065 * W,
-    h = 0.091 * H;
-  ctx.drawImage(assets.studio, x, y, w, h);
-  if (actor) {
-    let future = { ...player, x: 0, z: 14.8, facing: Math.PI * 0.25, moving: false };
-    actor.draw(ctx, future, x + w * 0.57, y + h * 0.95, h * 0.55, 'warm', time + 7);
+  ],
+  FEED_BOX = { x: 0.716, y: 0.36, w: 0.065, h: 0.091 },
+  FEED_VIEW = { u0: 0.53, v0: 0.4, u1: 0.83, v1: 0.82 }; // same 1.28 aspect as the glass
+function facingTo(a, b) {
+  const s = scenes[2],
+    p = screenPoint(s, a.x, a.z),
+    q = screenPoint(s, b.x, b.z);
+  return Math.atan2(q.u - p.u, -(q.v - p.v));
+}
+// Tape cross on the studio floor. `map` converts frame coordinates to canvas pixels.
+const TAPE_R = 0.32,
+  TAPE = [
+    [-TAPE_R, -TAPE_R, TAPE_R, TAPE_R],
+    [-TAPE_R, TAPE_R, TAPE_R, -TAPE_R],
+  ];
+function drawTapeMark(map, glow) {
+  const s = scenes[2];
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (const [ax, az, bx, bz] of TAPE) {
+    const a = screenPoint(s, MARK.x + ax, MARK.z + az),
+      b = screenPoint(s, MARK.x + bx, MARK.z + bz),
+      [x0, y0] = map(a.u, a.v),
+      [x1, y1] = map(b.u, b.v);
+    ctx.strokeStyle = `rgba(222,204,146,${0.55 + glow * 0.45})`;
+    ctx.lineWidth = Math.max(1.5, Math.hypot(x1 - x0, y1 - y0) * 0.09);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
   }
-  ctx.fillStyle = 'rgba(20,72,40,.28)';
+  ctx.restore();
+}
+const roomMap = (u, v) => [u * W, v * H];
+function drawMonitor() {
+  const x = FEED_BOX.x * W,
+    y = FEED_BOX.y * H,
+    w = FEED_BOX.w * W,
+    h = FEED_BOX.h * H,
+    fv = FEED_VIEW,
+    sx = w / ((fv.u1 - fv.u0) * W),
+    sy = h / ((fv.v1 - fv.v0) * H),
+    img = assets.studio,
+    s = scenes[2],
+    synced = prediction.phase === 'resolved' && prediction.outcome === 'followed',
+    resisted = prediction.outcome === 'resisted';
+  ctx.save();
+  polygon(GLASS);
+  ctx.clip();
+  ctx.drawImage(
+    img,
+    fv.u0 * img.width,
+    fv.v0 * img.height,
+    (fv.u1 - fv.u0) * img.width,
+    (fv.v1 - fv.v0) * img.height,
+    x,
+    y,
+    w,
+    h,
+  );
+  drawTapeMark((u, v) => [x + (u - fv.u0) * W * sx, y + (v - fv.v0) * H * sy], 0.3);
+  if (actor) {
+    feedFigure(prediction, player, feedActor, facingTo);
+    const p = screenPoint(s, feedActor.x, feedActor.z),
+      d = project(s.h, feedActor.x, feedActor.z).d;
+    actor.draw(
+      ctx,
+      feedActor,
+      x + (p.u - fv.u0) * W * sx,
+      y + (p.v - fv.v0) * H * sy,
+      ((s.nearHeight * H) / d) * sy,
+      'neutral',
+      time,
+    );
+  }
+  ctx.fillStyle = synced ? 'rgba(122,62,24,.24)' : 'rgba(20,72,40,.32)';
   ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = '#a9c8a2';
-  ctx.font = Math.max(4, H * 0.006) + 'px monospace';
-  ctx.fillText('+00:07', x + w * 0.04, y + h * 0.13);
+  if (time < feedTearUntil || (resisted && !reduced && Math.sin(time * 2.3) > 0.985)) {
+    for (let i = 0; i < 9; i++) {
+      ctx.fillStyle = `rgba(205,222,205,${0.12 + random() * 0.3})`;
+      ctx.fillRect(x + (random() - 0.5) * w * 0.2, y + random() * h, w, Math.max(1, h * 0.02));
+    }
+  }
   ctx.strokeStyle = '#061a0990';
+  ctx.lineWidth = Math.max(0.5, h / 90);
   for (let i = 0; i < 15; i++) {
-    let yy = y + (i / 15) * h;
+    const yy = y + (i / 15) * h;
     ctx.beginPath();
     ctx.moveTo(x, yy);
     ctx.lineTo(x + w, yy);
     ctx.stroke();
   }
+  ctx.fillStyle = synced ? '#f0c9a0' : '#cfe3c8';
+  ctx.font = `${Math.max(5, h * 0.13)}px monospace`;
+  ctx.fillText(
+    prediction.phase === 'idle' ? 'LIVE' : synced ? '+00:00' : '+00:07',
+    x + w * 0.05,
+    y + h * 0.17,
+  );
+  if (Math.floor(time * 2) % 2 === 0) {
+    ctx.fillStyle = '#d5523c';
+    ctx.beginPath();
+    ctx.arc(x + w * 0.9, y + h * 0.12, h * 0.035, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
+}
+// How strongly the studio's ON AIR sign burns, from the state of the prediction.
+function onAirLevel() {
+  const pr = prediction;
+  if (pr.phase === 'idle') return 0;
+  if (pr.phase === 'preview') return 0.05;
+  if (pr.phase === 'countdown')
+    return reduced ? 0.08 : 0.03 + 0.1 * Math.max(0, 1 - (pr.clock % 1) * 3);
+  if (pr.outcome === 'followed') return 0.14;
+  return reduced ? 0.04 : Math.sin(time * 17) * Math.sin(time * 5.3) > 0.2 ? 0.1 : 0.01;
+}
+// Plaza: the lobby lights flicker as the PA speaks, die as the lock releases, and the central
+// doors slide apart onto a red interior that stays lit for the rest of the game.
+const LOBBY = [
+  [0.653, 0.426],
+  [0.842, 0.426],
+  [0.842, 0.568],
+  [0.653, 0.568],
+];
+function drawPlaza() {
+  const pe = plazaEvent,
+    open = doorOpenness(pe);
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  softLight(0.744, 0.5, 0.11, '74,158,171', pe.phase === 'dormant' ? 0.025 : 0.01);
+  ctx.restore();
+  let dark = 0;
+  if (pe.phase === 'anticipation')
+    dark = reduced ? 0.35 : Math.sin(time * 23) * Math.sin(time * 7.1) > 0.25 ? 0.65 : 0.12;
+  else if (pe.phase === 'opening') dark = Math.min(0.75, pe.clock * 1.6);
+  else if (pe.phase === 'open') dark = 0.75;
+  if (dark > 0) {
+    // Cyan lobby lights die; once the doors move, what is left inside is red.
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = open > 0 ? `rgba(120,34,30,${dark})` : `rgba(16,24,28,${dark})`;
+    polygon(LOBBY);
+    ctx.fill();
+    ctx.restore();
+  }
+  if (open > 0) {
+    const cx = 0.757 * W,
+      top = 0.484 * H,
+      bottom = 0.568 * H,
+      half = 0.018 * W * open,
+      g = ctx.createLinearGradient(0, top, 0, bottom);
+    g.addColorStop(0, 'rgba(10,3,3,0.96)');
+    g.addColorStop(0.7, 'rgba(40,8,6,0.94)');
+    g.addColorStop(1, 'rgba(90,16,10,0.92)');
+    ctx.fillStyle = g;
+    ctx.fillRect(cx - half, top, half * 2, bottom - top);
+    // Light from deep inside the building, low and narrow, seen through the gap.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cx - half, top, half * 2, bottom - top);
+    ctx.clip();
+    ctx.globalCompositeOperation = 'screen';
+    softLight(0.757, 0.556, 0.045, '220,52,34', 0.55);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(210,160,140,.3)';
+    ctx.fillRect(cx - half - 1, top, 1.5, bottom - top);
+    ctx.fillRect(cx + half - 0.5, top, 1.5, bottom - top);
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    softLight(0.757, 0.6, 0.15, '210,44,30', 0.12 * open);
+    ctx.restore();
+  }
+  if (pe.phase === 'anticipation' || (pe.phase === 'opening' && pe.clock > 2 && pe.clock < 3.6)) {
+    // The horn speaker on the tower glows while it talks: a visual cue with sound off.
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    softLight(
+      0.925,
+      0.19,
+      0.03,
+      '220,200,160',
+      reduced ? 0.12 : 0.06 + Math.abs(Math.sin(time * 9)) * 0.1,
+    );
+    ctx.restore();
+  }
+}
+function drawStudio() {
+  drawTapeMark(roomMap, prediction.phase === 'countdown' ? onAirLevel() * 5 : 0);
+  drawMonitor();
+  const level = onAirLevel();
+  if (level > 0) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    softLight(0.787, 0.144, 0.075, '187,47,28', level);
+    // Followed: the microphone's tally lamp and the desk light answer the player.
+    if (prediction.outcome === 'followed') {
+      softLight(0.648, 0.352, 0.012, '235,60,40', 0.9);
+      softLight(0.64, 0.5, 0.2, '226,150,90', 0.07);
+    }
+    ctx.restore();
+  }
+}
+// Insert shot: while the monitor shows the future, the camera cuts in close on the screen.
+function drawInsertShot() {
+  const Z = 3.3,
+    t = prediction.clock,
+    length = prediction.phase === 'preview' ? PREVIEW : RESIST_INSERT;
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(Z, Z);
+  ctx.translate(-0.748 * W, -0.405 * H);
+  ctx.drawImage(assets.studio, 0, 0, W, H);
+  drawMonitor();
+  ctx.restore();
+  ctx.fillStyle = '#020304';
+  ctx.fillRect(0, 0, W, H * 0.08);
+  ctx.fillRect(0, H * 0.92, W, H * 0.08);
+  const fade = Math.max(0, 1 - t / 0.3, 1 - (length - t) / 0.3);
+  if (fade > 0) {
+    ctx.fillStyle = `rgba(2,3,4,${Math.min(1, fade)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
 }
 function environment() {
   if (sceneIndex === 0) {
@@ -922,21 +1515,8 @@ function environment() {
     );
     ctx.restore();
   }
-  if (sceneIndex === 1) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'screen';
-    softLight(0.744, 0.5, 0.11, '74,158,171', 0.025);
-    ctx.restore();
-  }
-  if (sceneIndex === 2) {
-    drawMonitor();
-    if (facts.monitor) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'screen';
-      softLight(0.787, 0.144, 0.075, '187,47,28', 0.06);
-      ctx.restore();
-    }
-  }
+  if (sceneIndex === 1) drawPlaza();
+  if (sceneIndex === 2) drawStudio();
   if (!reduced && sceneIndex === 0) {
     ctx.save();
     ctx.globalAlpha = 0.7;
@@ -959,18 +1539,121 @@ function random() {
   return seed / 4294967296;
 }
 const rain = Array.from({ length: 80 }, () => [random(), random(), random()]);
-function weather() {
-  if (reduced || sceneIndex === 2) return;
+// Rain overlay. `level` 1 is normal; above 1 adds a second, offset layer; 0 is no rain.
+function weather(level = 1) {
+  if (reduced || level <= 0) return;
   ctx.lineWidth = Math.max(0.5, W / 1900);
-  for (let [x, y, z] of rain) {
-    let u = (((x - elapsed * 0.013) % 1) + 1) % 1,
-      v = (y + elapsed * (0.28 + z * 0.16)) % 1;
-    ctx.strokeStyle = `rgba(175,193,204,${0.025 + z * 0.07})`;
-    ctx.beginPath();
-    ctx.moveTo(u * W, v * H);
-    ctx.lineTo((u - 0.002) * W, (v + 0.014 + z * 0.01) * H);
-    ctx.stroke();
+  const layers = level > 1 ? 2 : 1;
+  for (let layer = 0; layer < layers; layer++) {
+    const alpha = layer ? level - 1 : Math.min(1, level),
+      speed = 1 + layer * 0.35;
+    for (let [x, y, z] of rain) {
+      let u = (((x + layer * 0.37 - elapsed * 0.013) % 1) + 1) % 1,
+        v = (y + layer * 0.5 + elapsed * (0.28 + z * 0.16) * speed) % 1;
+      ctx.strokeStyle = `rgba(175,193,204,${(0.025 + z * 0.07) * alpha})`;
+      ctx.beginPath();
+      ctx.moveTo(u * W, v * H);
+      ctx.lineTo((u - 0.002) * W, (v + 0.014 + z * 0.01) * H);
+      ctx.stroke();
+    }
   }
+}
+// The tower's ON AIR sign as seen from the street and from the plaza.
+// Outline of the tower's ON AIR sign as painted in the street and plaza backgrounds.
+const TOWER_SIGN = [
+  [
+    [0.585, 0.131],
+    [0.645, 0.131],
+    [0.645, 0.165],
+    [0.585, 0.165],
+  ],
+  [
+    [0.489, 0.08],
+    [0.554, 0.065],
+    [0.554, 0.095],
+    [0.49, 0.12],
+  ],
+];
+const STREET_LAMP = [0.402, 0.392];
+function drawEnding() {
+  const e = ending,
+    k = Math.min(1, e.clock / 2.2),
+    index = e.shot === 'street' ? 0 : 1,
+    sign = TOWER_SIGN[index],
+    su = (sign[0][0] + sign[2][0]) / 2,
+    sv = (sign[0][1] + sign[2][1]) / 2,
+    sr = (sign[2][1] - sign[0][1]) * 1.4;
+  ctx.drawImage(assets[scenes[index].id], 0, 0, W, H);
+  if (index === 1) drawPlaza();
+  ctx.save();
+  if (e.tower === 'blazing') {
+    ctx.globalCompositeOperation = 'screen';
+    const pulse = reduced ? 0 : Math.sin(time * 6) * 0.08;
+    softLight(su, sv, sr * 0.9, '255,90,70', (0.55 + pulse) * k);
+    softLight(su, sv, sr * 3, '230,40,28', (0.22 + pulse) * k);
+  } else {
+    // The painted neon is bright: cover the whole sign evenly, then dim its halo.
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = `rgba(14,16,20,${0.93 * k})`;
+    polygon(sign);
+    ctx.fill();
+    softLight(su, sv, sr * 2.2, '30,32,38', 0.6 * k);
+  }
+  ctx.restore();
+  if (index === 0) {
+    // The street lamp answers what the player did to it.
+    const [lu, lv] = STREET_LAMP,
+      red = e.lamp === 'red' ? 1 : e.lamp === 'red-to-dark' ? 1 - k : 0,
+      dark =
+        e.lamp === 'red-to-dark' ? k : e.lamp === 'relight' ? 1 - k : e.lamp === 'dark' ? 1 : 0;
+    ctx.save();
+    if (red > 0) {
+      ctx.globalCompositeOperation = 'multiply';
+      softLight(lu, lv, 0.05, '255,52,40', red);
+      ctx.globalCompositeOperation = 'screen';
+      softLight(lu, lv, 0.03, '255,40,24', 0.55 * red * (e.lamp === 'red' ? 1 + k * 0.5 : 1));
+    }
+    if (dark > 0) {
+      ctx.globalCompositeOperation = 'multiply';
+      softLight(lu, lv, 0.055, '22,25,30', 0.92 * dark);
+    }
+    ctx.restore();
+  }
+  weather(e.rain === 'heavier' ? 1 + k * 0.8 : Math.max(0, 1 - e.clock / 2.5));
+  ctx.fillStyle = '#020304';
+  ctx.fillRect(0, 0, W, H * 0.04);
+  ctx.fillRect(0, H * 0.94, W, H * 0.06);
+  const fade = Math.max(0, 1 - e.clock / 0.6, 1 - (e.duration - e.clock) / 0.8);
+  if (fade > 0) {
+    ctx.fillStyle = `rgba(2,3,4,${Math.min(1, fade)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+// Broadcast catch: the frame loses vertical hold for a moment and drains of colour. One
+// controlled roll, no flashing; reduced motion gets only the desaturation.
+function drawPictureSkip() {
+  const k = (time - skipAt) / RECOVERY;
+  if (k < 0 || k >= 1) return;
+  const strength = Math.sin(k * Math.PI);
+  if (!reduced) {
+    const roll = Math.round(H * 0.6 * (1 - (1 - k) ** 3)) % H;
+    ctx.drawImage(canvas, 0, 0, W, H - roll, 0, roll, W, H - roll);
+    ctx.drawImage(canvas, 0, H - roll, W, roll, 0, 0, W, roll);
+    ctx.fillStyle = '#030405';
+    ctx.fillRect(0, roll - H * 0.012, W, H * 0.024);
+    for (let i = 0; i < 3; i++) {
+      const y = ((k * 2.3 + i * 0.31) % 1) * H,
+        band = H * 0.03;
+      ctx.drawImage(canvas, 0, y, W, band, (random() - 0.5) * W * 0.04 * strength, y, W, band);
+    }
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = 'saturation';
+  ctx.fillStyle = `rgba(128,128,128,${0.85 * strength})`;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+  ctx.fillStyle = `rgba(4,6,8,${0.35 * strength})`;
+  ctx.fillRect(0, 0, W, H);
 }
 function drawMarker() {
   if (!marker || time - marker.t > 1.8 || mode !== 'play') return;
@@ -1005,15 +1688,18 @@ function render(now) {
   }
   if (ready) {
     const s = scenes[sceneIndex];
-    ctx.drawImage(assets[s.id], 0, 0, W, H);
-    environment();
-    if (mode !== 'title') drawActor();
-    drawMarker();
-    weather();
-    if (time < flashUntil && !reduced) {
-      ctx.fillStyle = 'rgba(158,171,161,.10)';
-      ctx.fillRect(0, 0, W, H);
+    const insert = sceneIndex === 2 && insertShot(prediction);
+    $('#hud').classList.toggle('cinematic', insert || mode === 'ending');
+    if (mode === 'ending' || (mode === 'end' && ending)) drawEnding();
+    else if (insert) drawInsertShot();
+    else {
+      ctx.drawImage(assets[s.id], 0, 0, W, H);
+      environment();
+      if (mode !== 'title') drawActor();
+      drawMarker();
+      if (sceneIndex !== 2) weather();
     }
+    drawPictureSkip();
     if (sceneIndex === 0 && broadcast.phase === 'live' && !reduced) {
       ctx.fillStyle = 'rgba(65,24,17,.035)';
       ctx.fillRect(0, 0, W, H);
