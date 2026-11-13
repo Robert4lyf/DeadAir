@@ -13,6 +13,8 @@ import {
   cutBroadcast,
   crossingOpen,
   inShelter,
+  recovering,
+  RECOVERY,
 } from './encounter.js';
 import { SpriteActor, turnToward } from './sprites.js';
 import {
@@ -61,7 +63,7 @@ let W = 1280,
   transitionFrom = 0,
   transitionApplied = false,
   statusUntil = 0,
-  flashUntil = 0,
+  skipAt = -10, // when the last picture skip (broadcast catch) began
   feedTearUntil = 0,
   arrivalGuard = null; // the exit just used; it gets no prompt until the player steps away
 let player = makePlayer(scenes[0].spawn),
@@ -296,7 +298,9 @@ function updateObjective() {
           ? 'CROSSING OPEN / FOLLOW THE TOWER'
           : broadcast.phase === 'dormant'
             ? 'FOLLOW THE TOWER / INSPECT THE STREET'
-            : 'FIND COVER OR CUT THE SERVICE FEED',
+            : broadcast.holding
+              ? 'THE TOWER IS HOLDING ON YOU / CUT THE SERVICE FEED'
+              : 'FIND COVER OR CUT THE SERVICE FEED',
   );
 }
 function enter() {
@@ -419,10 +423,13 @@ function interact(id = interaction?.id) {
       path = [];
       queuedAction = null;
       noise(0.12, 0.35, 0.7, 220);
+      if (audio) humGain.gain.setTargetAtTime(0.008, audio.currentTime, 0.3);
       tell(
-        'The service feed is cut. The crossing unlocks. Something in the speaker keeps breathing.',
+        broadcast.caught
+          ? 'You pull the breaker. The transmission drops mid-word, but the red lamp stays lit. Somewhere, the tower kept your picture.'
+          : 'You pull the breaker. The speaker dies mid-word and the street lamp goes out. The crossing unlocks.',
         7,
-        3,
+        5,
       );
     } else tell('The breaker is off. The crossing is open.');
   } else if (id === 'crossing') {
@@ -661,27 +668,41 @@ function encounterEvent(event) {
     say('ON AIR. Stay beneath the awning. The open crossing is listening.', 4, 4);
     note(54, 0.8, 0.12, 'sawtooth');
   } else if (event === 'caught') {
+    // The picture skips: input is held while the frame rolls, and the player lands in shelter.
     player.x = 1.4;
     player.z = 13.3;
     player.moving = false;
     keys.clear();
     path = [];
     queuedAction = null;
-    flashUntil = time + 0.6;
+    skipAt = time;
+    say('The picture skips.', RECOVERY, 5);
+    noise(0.16, 0.6, 0, 1200);
+    note(110, RECOVERY, 0.06, 'sawtooth');
+  } else if (event === 'recovered') {
     say(
-      'The picture skips. You are back beneath the awning. Wait for the transmission to pass.',
+      broadcast.attempts > 1
+        ? 'Back under the awning again. The tower is holding on you. The breaker is at the far end of this awning.'
+        : 'You are back under the awning, and the street lamp has turned red. The tower has your picture now; it will not pass on its own. Cut the service feed: the breaker is at the far end of this awning.',
+      9,
+      5,
+    );
+  } else if (event === 'clear') {
+    say(
+      'The transmission passes over the awning. The speaker clicks: “Thank you for listening.” The crossing signal changes.',
       6,
       4,
     );
-    noise(0.16, 0.6, 0, 1200);
-  } else if (event === 'clear') {
-    say('The speaker falls silent. The crossing signal changes. You can go.', 5, 4);
-    note(320, 0.25, 0.04);
+    note(392, 0.3, 0.04);
+    note(294, 0.5, 0.035);
   }
+  updateObjective();
 }
 // While a sequence holds the player (the monitor insert shot), input is ignored.
 function controlLocked() {
-  return sceneIndex === 2 && controlHeld(prediction);
+  return (
+    (sceneIndex === 2 && controlHeld(prediction)) || (sceneIndex === 0 && recovering(broadcast))
+  );
 }
 function predictionEvent(event) {
   const here = sceneIndex === 2;
@@ -753,9 +774,11 @@ function update(dt) {
       '#status',
       sceneIndex === 2
         ? 'STUDIO / LIVE'
-        : broadcast.phase === 'live'
-          ? 'TRANSMITTING'
-          : 'SIGNAL DETECTED',
+        : broadcast.holding
+          ? 'HOLDING'
+          : broadcast.phase === 'live'
+            ? 'TRANSMITTING'
+            : 'SIGNAL DETECTED',
     );
   const locked = controlLocked();
   if (locked) {
@@ -844,11 +867,17 @@ function update(dt) {
       '#broadcastTimer',
       broadcast.phase === 'warning'
         ? 'TRANSMISSION IN ' + Math.ceil(broadcast.remaining)
-        : 'ON AIR / ' + Math.ceil(broadcast.remaining),
+        : broadcast.holding
+          ? 'ON AIR / HOLDING ON YOU'
+          : 'ON AIR / ' + Math.ceil(broadcast.remaining),
     );
     setText(
       '#broadcastHelp',
-      inShelter(player) ? 'IN SHADOW / STAY HERE' : 'RIGHT-HAND AWNING OR SERVICE BREAKER',
+      broadcast.holding
+        ? 'CUT THE FEED: BREAKER AT THE END OF THIS AWNING'
+        : inShelter(player)
+          ? 'IN SHADOW / STAY HERE'
+          : 'RIGHT-HAND AWNING OR SERVICE BREAKER',
     );
   }
   updateObjective();
@@ -995,11 +1024,37 @@ function drawStreetProps() {
     ctx.lineTo(0.643 * W, 0.623 * H);
     ctx.stroke();
   }
+  // The street lamp records how the broadcast ended: red if it caught the player (for the
+  // rest of the game), dark if the feed was cut, humming while the transmission runs.
+  if (broadcast.caught) {
+    // Multiply first so the near-white lamp actually turns red, then let it glow.
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    softLight(0.402, 0.392, 0.05, '255,52,40', 1);
+    ctx.globalCompositeOperation = 'screen';
+    softLight(0.402, 0.392, 0.028, '255,40,24', reduced ? 0.55 : 0.45 + Math.sin(time * 1.3) * 0.1);
+    softLight(0.4, 0.46, 0.13, '200,40,24', 0.09);
+    ctx.restore();
+  } else if (broadcast.resolution === 'cut') {
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    softLight(0.402, 0.392, 0.055, '22,25,30', 0.92);
+    softLight(0.4, 0.46, 0.12, '60,64,72', 0.5);
+    ctx.restore();
+  }
   if (['warning', 'live'].includes(broadcast.phase) && !reduced) {
     ctx.save();
     ctx.globalCompositeOperation = 'screen';
     let amount = 0.05 + Math.max(0, Math.sin(time * 5)) * 0.07;
     softLight(0.404, 0.449, 0.08, '225,156,83', amount);
+    ctx.restore();
+  }
+  if (broadcast.holding && !recovering(broadcast)) {
+    // Point at the way out: the breaker panel pulses at the far end of the awning.
+    ctx.save();
+    ctx.strokeStyle = `rgba(230,180,110,${reduced ? 0.8 : 0.45 + Math.sin(time * 4) * 0.35})`;
+    ctx.lineWidth = Math.max(1.5, W / 800);
+    ctx.strokeRect(0.651 * W, 0.598 * H, 0.032 * W, 0.046 * H);
     ctx.restore();
   }
   if (facts.breaker) {
@@ -1247,6 +1302,32 @@ function weather() {
     ctx.stroke();
   }
 }
+// Broadcast catch: the frame loses vertical hold for a moment and drains of colour. One
+// controlled roll, no flashing; reduced motion gets only the desaturation.
+function drawPictureSkip() {
+  const k = (time - skipAt) / RECOVERY;
+  if (k < 0 || k >= 1) return;
+  const strength = Math.sin(k * Math.PI);
+  if (!reduced) {
+    const roll = Math.round(H * 0.6 * (1 - (1 - k) ** 3)) % H;
+    ctx.drawImage(canvas, 0, 0, W, H - roll, 0, roll, W, H - roll);
+    ctx.drawImage(canvas, 0, H - roll, W, roll, 0, 0, W, roll);
+    ctx.fillStyle = '#030405';
+    ctx.fillRect(0, roll - H * 0.012, W, H * 0.024);
+    for (let i = 0; i < 3; i++) {
+      const y = ((k * 2.3 + i * 0.31) % 1) * H,
+        band = H * 0.03;
+      ctx.drawImage(canvas, 0, y, W, band, (random() - 0.5) * W * 0.04 * strength, y, W, band);
+    }
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = 'saturation';
+  ctx.fillStyle = `rgba(128,128,128,${0.85 * strength})`;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+  ctx.fillStyle = `rgba(4,6,8,${0.35 * strength})`;
+  ctx.fillRect(0, 0, W, H);
+}
 function drawMarker() {
   if (!marker || time - marker.t > 1.8 || mode !== 'play') return;
   ctx.save();
@@ -1290,10 +1371,7 @@ function render(now) {
       drawMarker();
       weather();
     }
-    if (time < flashUntil && !reduced) {
-      ctx.fillStyle = 'rgba(158,171,161,.10)';
-      ctx.fillRect(0, 0, W, H);
-    }
+    drawPictureSkip();
     if (sceneIndex === 0 && broadcast.phase === 'live' && !reduced) {
       ctx.fillStyle = 'rgba(65,24,17,.035)';
       ctx.fillRect(0, 0, W, H);

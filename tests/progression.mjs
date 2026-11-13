@@ -49,6 +49,46 @@ assert.equal(mode, 'end');
 `);
 });
 
+test('the shelter route: wait the transmission out under the awning', async () => {
+  const g = await bootGame();
+  g.run(`
+walkTo(1.4, 13.4);
+until(() => broadcast.phase === 'clear');
+assert.equal(broadcast.resolution, 'sheltered');
+assert.equal(broadcast.caught, false);
+use('crossing', () => sceneIndex === 1);
+`);
+});
+
+test('getting caught: a held picture skip, then the tower holds until the feed is cut', async () => {
+  const g = await bootGame();
+  g.run(`
+walkTo(-0.5, 13.6);
+until(() => broadcast.phase === 'live');
+assert(!inShelter(player));
+until(() => recovering(broadcast));
+assert(controlLocked(), 'Input is held during the picture skip');
+assert(inShelter(player), 'The skip lands the player in shelter');
+assert.equal(path.length, 0);
+keys.add('KeyA');
+const at = { x: player.x, z: player.z };
+step(0.5);
+assert.deepEqual({ x: player.x, z: player.z }, at, 'No movement during the skip');
+keys.clear();
+until(() => !recovering(broadcast));
+assert.equal(broadcast.attempts, 1, 'Exactly one catch');
+assert(broadcast.holding);
+step(20);
+assert.equal(broadcast.phase, 'live', 'Waiting no longer clears the transmission');
+assert(!interact('crossing') && sceneIndex === 0);
+use('breaker', () => facts.breaker);
+assert(inShelter(player), 'The breaker is reachable from cover');
+assert.equal(broadcast.resolution, 'cut');
+assert(broadcast.caught, 'The catch is remembered after the cut');
+use('crossing', () => sceneIndex === 1);
+`);
+});
+
 test('the prediction holds input during the preview, then resolves as followed', async () => {
   const g = await bootGame();
   g.run(`
