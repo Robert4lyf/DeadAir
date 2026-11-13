@@ -16,15 +16,15 @@ Open http://localhost:8000 in a modern browser. On Windows, use `py` instead of 
 
 ## Controls
 
-| Input | Action |
-| --- | --- |
-| WASD or arrow keys | Walk |
-| Shift | Run |
-| E or Space | Interact |
-| F | Toggle torch |
-| Escape | Pause / resume |
+| Input                   | Action                |
+| ----------------------- | --------------------- |
+| WASD or arrow keys      | Walk                  |
+| Shift                   | Run                   |
+| E or Space              | Interact              |
+| F                       | Toggle torch          |
+| Escape                  | Pause / resume        |
 | Click or tap the ground | Walk to a destination |
-| Click or tap an object | Approach and interact |
+| Click or tap an object  | Approach and interact |
 
 Touch controls appear on supported devices. Headphones are recommended; sound can be toggled in the interface.
 
@@ -47,17 +47,19 @@ npm test
 
 The tests cover navigation and perspective mapping, encounter rules, and progression through the studio ending. They do not replace visual and audio playtesting.
 
+Formatting uses Prettier: `npm run format` rewrites files and `npm run format:check` verifies them. CI runs both the tests and the format check on every pull request.
+
 ## Files
 
-| Path | Purpose |
-| --- | --- |
-| `dist/index.html`, `dist/style.css` | Interface and layout |
-| `dist/game.js` | Gameplay, rendering, input, and procedural audio |
-| `dist/navigation.js` | Scene projections, routes, obstacles, and interactions |
-| `dist/encounter.js` | Broadcast encounter rules |
-| `dist/sprites.js` | Sprite extraction, animation, and lighting |
-| `dist/art/` | Backgrounds and transparent character sheets |
-| `tests/` | Node.js checks |
-| `.openai/hosting.json` | Existing ChatGPT Sites deployment identity |
+| Path                                | Purpose                                                |
+| ----------------------------------- | ------------------------------------------------------ |
+| `dist/index.html`, `dist/style.css` | Interface and layout                                   |
+| `dist/game.js`                      | Gameplay, rendering, input, and procedural audio       |
+| `dist/navigation.js`                | Scene projections, routes, obstacles, and interactions |
+| `dist/encounter.js`                 | Broadcast encounter rules                              |
+| `dist/sprites.js`                   | Sprite extraction, animation, and lighting             |
+| `dist/art/`                         | Backgrounds and transparent character sheets           |
+| `tests/`                            | Node.js checks                                         |
+| `.openai/hosting.json`              | Existing ChatGPT Sites deployment identity             |
 
 This is an early proof of concept. Character animation and background integration still need refinement. Artwork was generated with AI and is included with the source. This repository imports published Sites source commit `3637771338a1c3fae2100a419bc26524fea1a9d1`.
