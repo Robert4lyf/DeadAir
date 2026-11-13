@@ -31,6 +31,13 @@ import {
   LEAD,
   RESIST_INSERT,
 } from './prediction.js';
+import {
+  createPlazaEvent,
+  updatePlazaEvent,
+  leavePlaza,
+  doorOpenness,
+  doorsOpen,
+} from './plaza.js';
 const elements = new Map(),
   $ = (s) => {
     if (!elements.has(s)) elements.set(s, document.querySelector(s));
@@ -69,7 +76,8 @@ let W = 1280,
 let player = makePlayer(scenes[0].spawn),
   broadcast = createBroadcast(),
   facts = { notice: false, intercom: false, breaker: false, monitor: false },
-  prediction = createPrediction();
+  prediction = createPrediction(),
+  plazaEvent = createPlazaEvent();
 // The figure on the studio monitor. Reused every frame and never aliased to the real player.
 const feedActor = makePlayer({ x: 0, z: 0 });
 // Per-frame HUD updates only touch the DOM when a value actually changes.
@@ -192,20 +200,23 @@ function makeAudio() {
     audio = null;
   }
 }
-function note(freq, duration = 0.15, gain = 0.07, type = 'sine') {
+function note(freq, duration = 0.15, gain = 0.07, type = 'sine', delay = 0) {
   if (!audio) return;
   let o = audio.createOscillator(),
-    g = audio.createGain();
+    g = audio.createGain(),
+    at = audio.currentTime + delay;
   o.type = type;
   o.frequency.value = freq;
-  g.gain.setValueAtTime(gain, audio.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + duration);
+  g.gain.setValueAtTime(0.0001, audio.currentTime);
+  g.gain.setValueAtTime(gain, at);
+  g.gain.exponentialRampToValueAtTime(0.001, at + duration);
   o.connect(g).connect(master);
-  o.start();
-  o.stop(audio.currentTime + duration);
+  o.start(at);
+  o.stop(at + duration);
 }
-function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900) {
+function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0) {
   if (!audio) return;
+  const at = audio.currentTime + delay;
   let n = audio.createBufferSource(),
     f = audio.createBiquadFilter(),
     g = audio.createGain(),
@@ -214,11 +225,17 @@ function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900) {
   f.type = 'lowpass';
   f.frequency.value = freq;
   p.pan.value = pan;
-  g.gain.setValueAtTime(gain, audio.currentTime);
-  g.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + duration);
+  g.gain.setValueAtTime(0.0001, audio.currentTime);
+  g.gain.setValueAtTime(gain, at);
+  g.gain.exponentialRampToValueAtTime(0.001, at + duration);
   n.connect(f).connect(g).connect(p).connect(master);
-  n.start();
-  n.stop(audio.currentTime + duration);
+  n.start(at);
+  n.stop(at + duration);
+}
+// A horn-speaker voice: band-limited bursts in a speech-like rhythm, panned to the tower.
+function paVoice(words = 8, pan = 0.7) {
+  for (let i = 0; i < words; i++)
+    noise(0.05 + (i % 3) * 0.012, 0.16 + (i % 2) * 0.08, pan, 1400 + (i % 4) * 260, i * 0.27);
 }
 // Subtitles: lower-priority lines wait their turn instead of being dropped, and text the
 // player asked for (by interacting) always shows at once. Important lines it interrupts resume.
@@ -293,7 +310,9 @@ function updateObjective() {
             ? 'THE PICTURE HAS CAUGHT UP'
             : 'THE OTHER YOU IS STILL ON THE MONITOR'
       : sceneIndex === 1
-        ? 'CYAN DOORS / STUDIO 001'
+        ? doorsOpen(plazaEvent)
+          ? 'THE DOORS ARE OPEN / STUDIO 001'
+          : 'CYAN DOORS / STUDIO 001'
         : crossingOpen(broadcast)
           ? 'CROSSING OPEN / FOLLOW THE TOWER'
           : broadcast.phase === 'dormant'
@@ -322,6 +341,7 @@ function pause(show = true) {
   if (audio) master.gain.setTargetAtTime(show || muted ? 0 : 0.42, audio.currentTime, 0.1);
 }
 function changeScene(next) {
+  if (sceneIndex === 1) leavePlaza(plazaEvent);
   mode = 'transition';
   transitionTarget = next;
   transitionFrom = sceneIndex;
@@ -384,6 +404,7 @@ function nearby() {
 function label(o) {
   if (o.id === 'breaker' && facts.breaker) return 'Service feed isolated';
   if (o.id === 'crossing' && !crossingOpen(broadcast)) return 'Crossing signal red';
+  if (o.id === 'doors' && !doorsOpen(plazaEvent)) return 'The doors are opening';
   if (o.id === 'monitor')
     return prediction.phase === 'idle' || prediction.phase === 'resolved'
       ? 'Watch the studio monitor'
@@ -445,8 +466,13 @@ function interact(id = interaction?.id) {
     }
     changeScene(1);
   } else if (id === 'backStreet') changeScene(0);
-  else if (id === 'doors') changeScene(2);
-  else if (id === 'backPlaza') changeScene(1);
+  else if (id === 'doors') {
+    if (!doorsOpen(plazaEvent)) {
+      tell('The doors are still sliding open.', 2);
+      return false;
+    }
+    changeScene(2);
+  } else if (id === 'backPlaza') changeScene(1);
   else if (id === 'monitor') {
     if (startPrediction(prediction, player)) {
       facts.monitor = true;
@@ -698,6 +724,37 @@ function encounterEvent(event) {
   }
   updateObjective();
 }
+function plazaBeat(event) {
+  if (event === 'anticipate') {
+    say('A horn speaker on the tower crackles: “Door opening for our guest.”', 6, 4);
+    noise(0.07, 0.5, 0.75, 2600);
+    paVoice(6);
+    if (audio) humGain.gain.setTargetAtTime(0.13, audio.currentTime, 1.5);
+  } else if (event === 'unlock') {
+    say(
+      'A lock releases. The studio doors slide open on their own. You are nowhere near them.',
+      6,
+      5,
+    );
+    noise(0.16, 0.18, 0.2, 260);
+    note(62, 0.5, 0.1, 'triangle');
+    noise(0.06, 1.8, 0.2, 2400, 0.4);
+  } else if (event === 'announce') {
+    say(
+      broadcast.caught
+        ? '“Welcome back to Studio 001. We kept your picture from the side street.”'
+        : broadcast.resolution === 'cut'
+          ? '“Welcome back to Studio 001. Someone cut the feed on the side street. We had other ways to listen.”'
+          : '“Welcome back to Studio 001. You waited under the awning, just as we said you would.”',
+      7,
+      5,
+    );
+    paVoice(11);
+  } else if (event === 'settled') {
+    if (audio) humGain.gain.setTargetAtTime(0.085, audio.currentTime, 2);
+  }
+  updateObjective();
+}
 // While a sequence holds the player (the monitor insert shot), input is ignored.
 function controlLocked() {
   return (
@@ -841,6 +898,8 @@ function update(dt) {
   for (let event of updateBroadcast(broadcast, dt, player, sceneIndex)) encounterEvent(event);
   for (const event of updatePrediction(prediction, dt, player, sceneIndex === 2))
     predictionEvent(event);
+  if (sceneIndex === 1)
+    for (const event of updatePlazaEvent(plazaEvent, dt, player)) plazaBeat(event);
   if (mode !== 'play') return;
   interaction = controlLocked() ? null : nearby();
   let hoverObject = interactables.find((o) => o.id === hovered && o.scene === sceneIndex);
@@ -1209,6 +1268,76 @@ function onAirLevel() {
   if (pr.outcome === 'followed') return 0.14;
   return reduced ? 0.04 : Math.sin(time * 17) * Math.sin(time * 5.3) > 0.2 ? 0.1 : 0.01;
 }
+// Plaza: the lobby lights flicker as the PA speaks, die as the lock releases, and the central
+// doors slide apart onto a red interior that stays lit for the rest of the game.
+const LOBBY = [
+  [0.653, 0.426],
+  [0.842, 0.426],
+  [0.842, 0.568],
+  [0.653, 0.568],
+];
+function drawPlaza() {
+  const pe = plazaEvent,
+    open = doorOpenness(pe);
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  softLight(0.744, 0.5, 0.11, '74,158,171', pe.phase === 'dormant' ? 0.025 : 0.01);
+  ctx.restore();
+  let dark = 0;
+  if (pe.phase === 'anticipation')
+    dark = reduced ? 0.35 : Math.sin(time * 23) * Math.sin(time * 7.1) > 0.25 ? 0.65 : 0.12;
+  else if (pe.phase === 'opening') dark = Math.min(0.75, pe.clock * 1.6);
+  else if (pe.phase === 'open') dark = 0.75;
+  if (dark > 0) {
+    // Cyan lobby lights die; once the doors move, what is left inside is red.
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = open > 0 ? `rgba(120,34,30,${dark})` : `rgba(16,24,28,${dark})`;
+    polygon(LOBBY);
+    ctx.fill();
+    ctx.restore();
+  }
+  if (open > 0) {
+    const cx = 0.757 * W,
+      top = 0.484 * H,
+      bottom = 0.568 * H,
+      half = 0.018 * W * open,
+      g = ctx.createLinearGradient(0, top, 0, bottom);
+    g.addColorStop(0, 'rgba(10,3,3,0.96)');
+    g.addColorStop(0.7, 'rgba(40,8,6,0.94)');
+    g.addColorStop(1, 'rgba(90,16,10,0.92)');
+    ctx.fillStyle = g;
+    ctx.fillRect(cx - half, top, half * 2, bottom - top);
+    // Light from deep inside the building, low and narrow, seen through the gap.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cx - half, top, half * 2, bottom - top);
+    ctx.clip();
+    ctx.globalCompositeOperation = 'screen';
+    softLight(0.757, 0.556, 0.045, '220,52,34', 0.55);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(210,160,140,.3)';
+    ctx.fillRect(cx - half - 1, top, 1.5, bottom - top);
+    ctx.fillRect(cx + half - 0.5, top, 1.5, bottom - top);
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    softLight(0.757, 0.6, 0.15, '210,44,30', 0.12 * open);
+    ctx.restore();
+  }
+  if (pe.phase === 'anticipation' || (pe.phase === 'opening' && pe.clock > 2 && pe.clock < 3.6)) {
+    // The horn speaker on the tower glows while it talks: a visual cue with sound off.
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    softLight(
+      0.925,
+      0.19,
+      0.03,
+      '220,200,160',
+      reduced ? 0.12 : 0.06 + Math.abs(Math.sin(time * 9)) * 0.1,
+    );
+    ctx.restore();
+  }
+}
 function drawStudio() {
   drawTapeMark(roomMap, prediction.phase === 'countdown' ? onAirLevel() * 5 : 0);
   drawMonitor();
@@ -1260,12 +1389,7 @@ function environment() {
     );
     ctx.restore();
   }
-  if (sceneIndex === 1) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'screen';
-    softLight(0.744, 0.5, 0.11, '74,158,171', 0.025);
-    ctx.restore();
-  }
+  if (sceneIndex === 1) drawPlaza();
   if (sceneIndex === 2) drawStudio();
   if (!reduced && sceneIndex === 0) {
     ctx.save();

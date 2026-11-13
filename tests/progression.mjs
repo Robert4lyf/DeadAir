@@ -89,6 +89,38 @@ use('crossing', () => sceneIndex === 1);
 `);
 });
 
+test('the plaza beat triggers once and survives backtracking', async () => {
+  const g = await bootGame();
+  g.run(`
+cutBroadcast(broadcast); // the street is already resolved
+goToScene(1);
+walkTo(-1.4, 10);
+assert.equal(plazaEvent.phase, 'anticipation');
+use('backStreet', () => sceneIndex === 0);
+until(() => mode === 'play');
+assert.equal(plazaEvent.phase, 'dormant', 'Leaving before the trigger resets it');
+use('crossing', () => sceneIndex === 1);
+until(() => mode === 'play');
+walkTo(0, 15);
+assert.equal(plazaEvent.phase, 'opening');
+let unlocks = 0;
+const original = plazaBeat;
+plazaBeat = (e) => (e === 'unlock' && unlocks++, original(e));
+assert(!interact('doors') || sceneIndex === 1);
+until(() => doorsOpen(plazaEvent));
+use('doors', () => sceneIndex === 2);
+until(() => mode === 'play');
+use('backPlaza', () => sceneIndex === 1);
+until(() => mode === 'play');
+walkTo(0, 10);
+walkTo(0, 18);
+step(5);
+assert.equal(unlocks, 0, 'The doors do not open a second time');
+assert(doorsOpen(plazaEvent));
+use('doors', () => sceneIndex === 2);
+`);
+});
+
 test('the prediction holds input during the preview, then resolves as followed', async () => {
   const g = await bootGame();
   g.run(`
