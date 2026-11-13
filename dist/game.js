@@ -277,6 +277,24 @@ function paVoice(words = 8, pan = 0.7, delay = 0, gain = 1) {
 // only if they are still relevant.
 let subtitle = null;
 const subtitleQueue = [];
+// The phases that time-sensitive lines belong to. A line said `while: during.x` is dropped as
+// soon as that phase ends, so instructions never resurface after they stop applying.
+const during = {
+  streetQuiet: () => broadcast.phase === 'dormant',
+  warning: () => broadcast.phase === 'warning',
+  transmission: () => broadcast.phase === 'live' && !broadcast.holding,
+  skip: () => recovering(broadcast),
+  holding: () => broadcast.holding && !recovering(broadcast),
+  crossingLocked: () => !crossingOpen(broadcast),
+  anticipation: () => plazaEvent.phase === 'anticipation',
+  doorsOpening: () => plazaEvent.phase === 'opening',
+  monitorIdle: () => prediction.phase === 'idle',
+  preview: () => prediction.phase === 'preview',
+  countdown: () => prediction.phase === 'countdown',
+  settling: () => prediction.phase === 'resolved' && !prediction.ready,
+  microphoneReady: () => prediction.ready && mode === 'play',
+  ending: () => mode === 'ending',
+};
 function relevant(entry) {
   return time < entry.expires && entry.scene === sceneIndex && (!entry.while || entry.while());
 }
@@ -382,7 +400,9 @@ function enter() {
   $('#hud').hidden = false;
   $('#touch').hidden = !touch;
   setChapter();
-  say('Find the crossing at the end of the street. The studio is still on air.', 6);
+  say('Find the crossing at the end of the street. The studio is still on air.', 6, 1, {
+    while: during.streetQuiet,
+  });
 }
 function pause(show = true) {
   if (!['play', 'pause'].includes(mode)) return;
@@ -524,6 +544,7 @@ function interact(id = interaction?.id) {
           : 'The crossing is locked while the tower transmits. Shelter under the awning or cut the service feed.',
         6,
         3,
+        { while: during.crossingLocked },
       );
       return false;
     }
@@ -531,7 +552,7 @@ function interact(id = interaction?.id) {
   } else if (id === 'backStreet') changeScene(0);
   else if (id === 'doors') {
     if (!doorsOpen(plazaEvent)) {
-      tell('The doors are still sliding open.', 2);
+      tell('The doors are still sliding open.', 2, 2, { while: during.doorsOpening });
       return false;
     }
     changeScene(2);
@@ -555,9 +576,12 @@ function interact(id = interaction?.id) {
         'The picture jumps. On the monitor, the studio is seven seconds ahead of you.',
         PREVIEW,
         4,
+        { while: during.preview },
       );
     } else if (prediction.phase === 'countdown')
-      tell('On the monitor, you are already standing at the microphone.', 3);
+      tell('On the monitor, you are already standing at the microphone.', 3, 2, {
+        while: during.countdown,
+      });
     else if (prediction.phase === 'resolved')
       tell(
         prediction.outcome === 'followed'
@@ -576,7 +600,9 @@ function interact(id = interaction?.id) {
           : 'On the monitor, the other you is still at the microphone, waiting to hear what you will do.';
       openDialog('#decision');
     } else if (prediction.phase === 'idle')
-      tell('The microphone is cold. On the monitor, the room is moving.', 4);
+      tell('The microphone is cold. On the monitor, the room is moving.', 4, 2, {
+        while: during.monitorIdle,
+      });
     else if (prediction.phase === 'countdown') {
       // Step the last half-metre onto the tape, so the room matches the picture.
       if (!atMark(player) || Math.hypot(player.x - MARK.x, player.z - MARK.z) > 0.2)
@@ -584,8 +610,11 @@ function interact(id = interaction?.id) {
       tell(
         'You step onto the tape mark and reach for the microphone. On the monitor, you already have.',
         3,
+        2,
+        { while: during.countdown },
       );
-    } else if (prediction.phase === 'resolved') tell('The picture is still settling.', 2);
+    } else if (prediction.phase === 'resolved')
+      tell('The picture is still settling.', 2, 2, { while: during.settling });
   }
   updateObjective();
   return true;
@@ -850,12 +879,15 @@ function encounterEvent(event) {
       'The lamps begin to hum. Shelter beneath the right-hand awning, or cut the service feed ahead.',
       7,
       4,
+      { while: during.warning },
     );
     noise(0.13, 1.5, 0.6, 1200);
     path = [];
     queuedAction = null;
   } else if (event === 'live') {
-    say('ON AIR. Stay beneath the awning. The open crossing is listening.', 4, 4);
+    say('ON AIR. Stay beneath the awning. The open crossing is listening.', 4, 4, {
+      while: during.transmission,
+    });
     note(54, 0.8, 0.12, 'sawtooth');
   } else if (event === 'caught') {
     // The picture skips: input is held while the frame rolls, and the player lands in shelter.
@@ -866,7 +898,7 @@ function encounterEvent(event) {
     path = [];
     queuedAction = null;
     skipAt = time;
-    say('The picture skips.', RECOVERY, 5);
+    say('The picture skips.', RECOVERY, 5, { while: during.skip });
     noise(0.16, 0.6, 0, 1200);
     note(110, RECOVERY, 0.06, 'sawtooth');
   } else if (event === 'recovered') {
@@ -876,6 +908,7 @@ function encounterEvent(event) {
         : 'You are back under the awning, and the street lamp has turned red. The tower has your picture now; it will not pass on its own. Cut the service feed: the breaker is at the far end of this awning.',
       9,
       5,
+      { while: during.holding },
     );
   } else if (event === 'clear') {
     say(
@@ -890,7 +923,9 @@ function encounterEvent(event) {
 }
 function plazaBeat(event) {
   if (event === 'anticipate') {
-    say('A horn speaker on the tower crackles: “Door opening for our guest.”', 6, 4);
+    say('A horn speaker on the tower crackles: “Door opening for our guest.”', 6, 4, {
+      while: during.anticipation,
+    });
     noise(0.07, 0.5, 0.75, 2600);
     paVoice(6);
     if (audio) humGain.gain.setTargetAtTime(0.13, audio.currentTime, 1.5);
@@ -899,6 +934,7 @@ function plazaBeat(event) {
       'A lock releases. The studio doors slide open on their own. You are nowhere near them.',
       6,
       5,
+      { while: during.doorsOpening },
     );
     noise(0.16, 0.18, 0.2, 260);
     note(62, 0.5, 0.1, 'triangle');
@@ -932,6 +968,7 @@ function predictionEvent(event) {
       'The picture is seven seconds ahead. On it, you are standing on the tape mark at the microphone. Go to it, or stay where you are.',
       LEAD,
       5,
+      { while: during.countdown },
     );
     noise(0.05, 0.25, 0.3, 2400);
   } else if (event === 'tick') {
@@ -961,6 +998,7 @@ function predictionEvent(event) {
         : 'The microphone is waiting for you.',
       5,
       2,
+      { while: during.microphoneReady },
     );
   }
   updateObjective();
