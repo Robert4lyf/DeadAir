@@ -1,3 +1,4 @@
+import { MARK, VIEW } from './prediction.js';
 // Perspective floor calibration and small navigation mesh, independent of rendering.
 export function homography(src, dst) {
   const a = [];
@@ -323,7 +324,7 @@ scenes.push({
       depth: 0.94,
     },
   ],
-  exit: { x: 0, z: 14.8 },
+  exit: { x: MARK.x, z: MARK.z },
   exitLabel: 'Use the mixing desk',
 });
 for (let s of scenes) {
@@ -422,10 +423,20 @@ export const interactables = [
   {
     id: 'monitor',
     scene: 2,
-    label: 'Examine the studio monitor',
-    x: 0,
-    z: 14.8,
-    reach: 1.9,
-    rect: [0.64, 0.35, 0.83, 0.58],
+    label: 'Watch the studio monitor',
+    x: VIEW.x,
+    z: VIEW.z,
+    reach: 1.5,
+    rect: [0.705, 0.345, 0.795, 0.47],
+  },
+  {
+    // Reach stays inside the tape mark, so walking over to use it always lands on the mark.
+    id: 'microphone',
+    scene: 2,
+    label: 'Step up to the microphone',
+    x: MARK.x,
+    z: MARK.z,
+    reach: 0.95,
+    rect: [0.6, 0.29, 0.69, 0.47],
   },
 ];

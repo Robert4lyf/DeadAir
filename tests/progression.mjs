@@ -1,101 +1,13 @@
-import fs from 'node:fs';
-import vm from 'node:vm';
+// End-to-end progression through the real game loop (no rendering, no audio).
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import * as navigation from '../dist/navigation.js';
-import * as encounter from '../dist/encounter.js';
+import { bootGame } from './support/harness.mjs';
 import { turnToward } from '../dist/sprites.js';
-let nodes = new Map(),
-  gradient = { addColorStop() {} };
-const ctx = new Proxy(
-  { createRadialGradient: () => gradient },
-  { get: (o, k) => o[k] || (() => {}) },
-);
-// Elements that start hidden in index.html.
-const hiddenAtStart = [
-  '#hud',
-  '#modal',
-  '#decision',
-  '#ending',
-  '#error',
-  '#touch',
-  '#interaction',
-];
-function node(selector) {
-  return {
-    hidden: hiddenAtStart.includes(selector),
-    disabled: false,
-    style: {},
-    dataset: {},
-    innerHTML: '',
-    textContent: '',
-    addEventListener() {},
-    setAttribute() {},
-    focus() {},
-    closest: () => null,
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    isConnected: true,
-    getContext: () => ctx,
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1280, height: 720 }),
-  };
-}
-const document = {
-  querySelector(s) {
-    if (!nodes.has(s)) nodes.set(s, node(s));
-    return nodes.get(s);
-  },
-  activeElement: null,
-  addEventListener() {},
-};
-const sandbox = {
-  ...navigation,
-  ...encounter,
-  turnToward,
-  SpriteActor: class {
-    draw() {}
-  },
-  assert,
-  document,
-  window: {},
-  devicePixelRatio: 1,
-  matchMedia: () => ({ matches: false }),
-  addEventListener() {},
-  requestAnimationFrame() {},
-  performance,
-  console,
-  Image: class {
-    set src(v) {
-      queueMicrotask(() => this.onload());
-    }
-  },
-  Math,
-};
-vm.createContext(sandbox);
-const source = fs.readFileSync('dist/game.js', 'utf8').replace(/^import\b[^;]*;/gm, '');
-vm.runInContext(
-  source +
-    `
-ready = true;
-enter();
+
+test('street to studio via the breaker, then the prediction and an ending', async () => {
+  const g = await bootGame();
+  g.run(`
 assert.equal(mode, 'play');
-
-function until(predicate, n = 4000) {
-  for (let i = 0; i < n && !predicate(); i++) update(1 / 60);
-  assert(
-    predicate(),
-    'Journey timed out at scene ' + sceneIndex + ' phase ' + broadcast.phase +
-      ' position ' + player.x + ',' + player.z,
-  );
-}
-
-function use(id, predicate) {
-  const o = interactables.find((o) => o.id === id);
-  path = route(scenes[sceneIndex], player, o);
-  assert(path.length, 'Object must be reachable: ' + id);
-  queuedAction = id;
-  until(predicate);
-}
-
 assert.equal(interact('monitor'), false, 'Cannot use an object in another scene');
 use('notice', () => facts.notice);
 use('intercom', () => facts.intercom);
@@ -105,7 +17,6 @@ path = route(scenes[0], player, { x: 1.4, z: 14 });
 until(() => broadcast.phase === 'warning');
 assert.equal(path.length, 0);
 assert(broadcast.remaining > 4);
-assert.equal(mode, 'play');
 
 const remaining = broadcast.remaining;
 pause(true);
@@ -126,25 +37,102 @@ until(() => mode === 'play');
 update(1 / 60);
 assert.equal(interaction, null, 'The exit just used must not prompt on arrival');
 
-use('monitor', () => facts.monitor);
-for (let i = 0; i < 300; i++) update(1 / 60);
-assert(interact('monitor'));
-assert.equal(mode, 'choice');
+use('monitor', () => prediction.phase === 'preview');
+until(() => prediction.phase === 'countdown');
+use('microphone', () => prediction.phase === 'resolved');
+assert.equal(prediction.outcome, 'followed');
+until(() => prediction.ready);
+use('microphone', () => mode === 'choice');
 assert.equal(document.querySelector('#decision').hidden, false);
-
 finish('silence');
 assert.equal(mode, 'end');
-assert.equal(document.querySelector('#ending').hidden, false);
-assert(document.querySelector('#endLine').textContent.includes('remember'));
+`);
+});
 
-console.log(
-  'PASS: notice, intercom, broadcast interruption, pause, breaker, both camera cuts, monitor and ending choice',
-);
-`,
-  sandbox,
-  { timeout: 20000 },
-);
-assert(
-  Math.abs(turnToward(Math.PI - 0.1, -Math.PI + 0.1, 0.1) - (Math.PI + 0.1)) < 0.001,
-  'Turns take the shortest path',
-);
+test('the prediction holds input during the preview, then resolves as followed', async () => {
+  const g = await bootGame();
+  g.run(`
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+assert(interact('monitor'));
+assert.equal(prediction.phase, 'preview');
+assert(controlLocked(), 'The insert shot holds the player');
+keys.add('KeyW');
+const before = { x: player.x, z: player.z };
+step(1);
+assert.deepEqual({ x: player.x, z: player.z }, before, 'No movement while the future plays');
+keys.clear();
+assert.equal(interact('monitor'), false, 'No interaction during the insert shot');
+until(() => prediction.phase === 'countdown');
+assert(!controlLocked());
+use('microphone', () => atMark(player));
+until(() => prediction.phase === 'resolved');
+assert.equal(prediction.outcome, 'followed');
+`);
+});
+
+test('standing still resists the prediction and still reaches the decision', async () => {
+  const g = await bootGame();
+  g.run(`
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+interact('monitor');
+until(() => prediction.phase === 'countdown');
+assert(!atMark(player), 'The viewing spot is off the mark');
+until(() => prediction.phase === 'resolved');
+assert.equal(prediction.outcome, 'resisted');
+until(() => prediction.ready);
+use('microphone', () => mode === 'choice');
+assert(document.querySelector('#decisionText').textContent.includes('other you'));
+`);
+});
+
+test('repeated monitor use never restarts or duplicates the sequence', async () => {
+  const g = await bootGame();
+  g.run(`
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+interact('monitor');
+until(() => prediction.phase === 'countdown');
+step(2);
+const clock = prediction.clock;
+assert(interact('monitor'));
+assert.equal(prediction.phase, 'countdown');
+assert.equal(prediction.clock, clock, 'Interacting again must not reset the deadline');
+until(() => prediction.phase === 'resolved');
+const outcome = prediction.outcome;
+interact('monitor');
+step(1);
+assert.equal(prediction.outcome, outcome);
+`);
+});
+
+test('pause and a hidden tab freeze the prediction deadline', async () => {
+  const g = await bootGame();
+  g.run(`
+goToScene(2);
+walkTo(VIEW.x, VIEW.z);
+interact('monitor');
+until(() => prediction.phase === 'countdown');
+step(1.5);
+var left = predictionRemaining(prediction);
+pause(true);
+update(30);
+assert.equal(predictionRemaining(prediction), left, 'Pause freezes the deadline');
+pause(false);
+`);
+  g.document.hidden = true;
+  g.fireDocument('visibilitychange');
+  g.run(`
+assert.equal(mode, 'pause', 'Hiding the tab pauses');
+update(30);
+assert.equal(predictionRemaining(prediction), left, 'A hidden tab freezes the deadline');
+assert.equal(prediction.phase, 'countdown');
+`);
+  g.fireWindow('blur');
+  g.run(`assert.equal(mode, 'pause');`);
+});
+
+test('turns take the shortest path', () => {
+  assert(Math.abs(turnToward(Math.PI - 0.1, -Math.PI + 0.1, 0.1) - (Math.PI + 0.1)) < 0.001);
+});

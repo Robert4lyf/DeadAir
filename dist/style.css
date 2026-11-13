@@ -656,3 +656,8 @@ kbd {
     font-size: var(--text-xs);
   }
 }
+
+/* Insert shots: only the subtitle stays over the picture. */
+#hud.cinematic > :not(#subtitle) {
+  visibility: hidden;
+}

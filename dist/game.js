@@ -15,6 +15,20 @@ import {
   inShelter,
 } from './encounter.js';
 import { SpriteActor, turnToward } from './sprites.js';
+import {
+  createPrediction,
+  startPrediction,
+  updatePrediction,
+  controlHeld,
+  insertShot,
+  remaining as predictionRemaining,
+  feedFigure,
+  atMark,
+  MARK,
+  PREVIEW,
+  LEAD,
+  RESIST_INSERT,
+} from './prediction.js';
 const elements = new Map(),
   $ = (s) => {
     if (!elements.has(s)) elements.set(s, document.querySelector(s));
@@ -46,15 +60,16 @@ let W = 1280,
   transitionTarget = 1,
   transitionFrom = 0,
   transitionApplied = false,
-  subtitleUntil = 0,
-  subtitlePriority = 0,
   statusUntil = 0,
   flashUntil = 0,
-  monitorAt = -1,
+  feedTearUntil = 0,
   arrivalGuard = null; // the exit just used; it gets no prompt until the player steps away
 let player = makePlayer(scenes[0].spawn),
   broadcast = createBroadcast(),
-  facts = { notice: false, intercom: false, breaker: false, monitor: false };
+  facts = { notice: false, intercom: false, breaker: false, monitor: false },
+  prediction = createPrediction();
+// The figure on the studio monitor. Reused every frame and never aliased to the real player.
+const feedActor = makePlayer({ x: 0, z: 0 });
 // Per-frame HUD updates only touch the DOM when a value actually changes.
 function setText(selector, text) {
   const el = $(selector);
@@ -203,11 +218,43 @@ function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900) {
   n.start();
   n.stop(audio.currentTime + duration);
 }
-function say(text, seconds = 5, priority = 1) {
-  if (time < subtitleUntil && priority < subtitlePriority) return;
-  $('#subtitle').textContent = text;
-  subtitleUntil = time + seconds;
-  subtitlePriority = priority;
+// Subtitles: lower-priority lines wait their turn instead of being dropped, and text the
+// player asked for (by interacting) always shows at once. Important lines it interrupts resume.
+let subtitle = null;
+const subtitleQueue = [];
+function showSubtitle(entry) {
+  subtitle = entry;
+  entry.until = time + entry.seconds;
+  setText('#subtitle', entry.text);
+}
+function say(text, seconds = 5, priority = 1, requested = false) {
+  const entry = { text, seconds, priority, until: 0, expires: time + seconds + 6 },
+    active = subtitle && time < subtitle.until;
+  if (active && subtitle.text === text) return;
+  if (!active || requested || priority >= subtitle.priority) {
+    if (active && subtitle.priority >= 3 && subtitle.priority > priority) {
+      subtitle.seconds = Math.max(1.5, subtitle.until - time);
+      subtitle.expires = time + subtitle.seconds + 6;
+      subtitleQueue.unshift(subtitle);
+    }
+    showSubtitle(entry);
+  } else {
+    subtitleQueue.push(entry);
+    if (subtitleQueue.length > 3) subtitleQueue.shift();
+  }
+}
+// Text that answers a player's own action.
+function tell(text, seconds = 5, priority = 2) {
+  say(text, seconds, priority, true);
+}
+function advanceSubtitles() {
+  if (!subtitle || time < subtitle.until) return;
+  subtitle = null;
+  while (subtitleQueue.length) {
+    const next = subtitleQueue.shift();
+    if (time < next.expires) return showSubtitle(next);
+  }
+  setText('#subtitle', '');
 }
 function status(text, seconds = 2) {
   $('#status').textContent = text;
@@ -220,17 +267,29 @@ function setChapter() {
   updateObjective();
 }
 function updateObjective() {
-  setText('#objectiveLead', sceneIndex === 2 ? 'STUDIO' : 'REACH');
+  const studio = sceneIndex === 2,
+    ahead = prediction.phase === 'preview' || prediction.phase === 'countdown';
+  setText('#objectiveLead', studio ? 'STUDIO' : 'REACH');
   setText(
     '#objectiveTitle',
-    sceneIndex === 2 ? (facts.monitor ? 'THE MICROPHONE' : 'THE MONITOR') : 'STUDIO 001',
+    !studio
+      ? 'STUDIO 001'
+      : prediction.phase === 'idle'
+        ? 'THE MONITOR'
+        : ahead
+          ? 'THE TAPE MARK'
+          : 'THE MICROPHONE',
   );
   setText(
     '#distance',
-    sceneIndex === 2
-      ? facts.monitor
-        ? 'THE PICTURE IS SEVEN SECONDS AHEAD'
-        : 'LOOK AT THE LIVE PICTURE'
+    studio
+      ? prediction.phase === 'idle'
+        ? 'LOOK AT THE LIVE PICTURE'
+        : ahead
+          ? 'THE PICTURE IS SEVEN SECONDS AHEAD'
+          : prediction.outcome === 'followed'
+            ? 'THE PICTURE HAS CAUGHT UP'
+            : 'THE OTHER YOU IS STILL ON THE MONITOR'
       : sceneIndex === 1
         ? 'CYAN DOORS / STUDIO 001'
         : crossingOpen(broadcast)
@@ -322,11 +381,19 @@ function label(o) {
   if (o.id === 'breaker' && facts.breaker) return 'Service feed isolated';
   if (o.id === 'crossing' && !crossingOpen(broadcast)) return 'Crossing signal red';
   if (o.id === 'monitor')
-    return facts.monitor ? 'Take the microphone' : 'Examine the studio monitor';
+    return prediction.phase === 'idle' || prediction.phase === 'resolved'
+      ? 'Watch the studio monitor'
+      : 'The picture is ahead of you';
+  if (o.id === 'microphone')
+    return prediction.ready
+      ? 'Take the microphone'
+      : prediction.phase === 'countdown'
+        ? 'Step up to the microphone'
+        : 'The boom microphone';
   return o.label;
 }
 function interact(id = interaction?.id) {
-  if (mode !== 'play' || !id) return false;
+  if (mode !== 'play' || !id || controlLocked()) return false;
   let object = interactables.find((o) => o.id === id);
   if (
     !object ||
@@ -336,14 +403,14 @@ function interact(id = interaction?.id) {
     return false;
   if (id === 'notice') {
     facts.notice = true;
-    say(
+    tell(
       'CURFEW NOTICE: During live transmission, shelter beneath the shop awnings. Service breakers isolate the signal.',
       8,
     );
     noise(0.02, 0.2, 0.6);
   } else if (id === 'intercom') {
     facts.intercom = true;
-    say('INTERCOM: “At the crossing, you will run. You will not reach the light.”', 7, 2);
+    tell('INTERCOM: “At the crossing, you will run. You will not reach the light.”', 7);
     noise(0.11, 1.5, 0.65, 1300);
   } else if (id === 'breaker') {
     if (!facts.breaker) {
@@ -352,15 +419,15 @@ function interact(id = interaction?.id) {
       path = [];
       queuedAction = null;
       noise(0.12, 0.35, 0.7, 220);
-      say(
+      tell(
         'The service feed is cut. The crossing unlocks. Something in the speaker keeps breathing.',
         7,
         3,
       );
-    } else say('The breaker is off. The crossing is open.');
+    } else tell('The breaker is off. The crossing is open.');
   } else if (id === 'crossing') {
     if (!crossingOpen(broadcast)) {
-      say(
+      tell(
         broadcast.phase === 'dormant'
           ? 'The crossing is locked to the broadcast. Look for the service breaker.'
           : 'The crossing is locked while the tower transmits. Shelter under the awning or cut the service feed.',
@@ -374,19 +441,48 @@ function interact(id = interaction?.id) {
   else if (id === 'doors') changeScene(2);
   else if (id === 'backPlaza') changeScene(1);
   else if (id === 'monitor') {
-    if (!facts.monitor) {
+    if (startPrediction(prediction, player)) {
       facts.monitor = true;
-      monitorAt = time;
+      keys.clear();
+      path = [];
+      queuedAction = null;
+      player.moving = false;
       noise(0.065, 1.2, -0.3, 1800);
-      say('The monitor shows you at this desk. The timestamp is seven seconds ahead.', 7, 2);
-    } else if (time - monitorAt < 4) {
-      say('On the monitor, you reach for the microphone before you move.', 4, 2);
-    } else {
+      tell(
+        'The picture jumps. On the monitor, the studio is seven seconds ahead of you.',
+        PREVIEW,
+        4,
+      );
+    } else if (prediction.phase === 'countdown')
+      tell('On the monitor, you are already standing at the microphone.', 3);
+    else if (prediction.phase === 'resolved')
+      tell(
+        prediction.outcome === 'followed'
+          ? 'The picture and the room agree now. There is no delay.'
+          : 'On the monitor, you are still at the microphone, looking out at yourself.',
+        4,
+      );
+  } else if (id === 'microphone') {
+    if (prediction.ready) {
       mode = 'choice';
       keys.clear();
       path = [];
+      $('#decisionText').textContent =
+        prediction.outcome === 'followed'
+          ? 'The monitor and the room agree. Your hand is already on the microphone.'
+          : 'On the monitor, the other you is still at the microphone, waiting to hear what you will do.';
       openDialog('#decision');
-    }
+    } else if (prediction.phase === 'idle')
+      tell('The microphone is cold. On the monitor, the room is moving.', 4);
+    else if (prediction.phase === 'countdown') {
+      // Step the last half-metre onto the tape, so the room matches the picture.
+      if (!atMark(player) || Math.hypot(player.x - MARK.x, player.z - MARK.z) > 0.2)
+        path = route(scenes[2], player, MARK);
+      tell(
+        'You step onto the tape mark and reach for the microphone. On the monitor, you already have.',
+        3,
+      );
+    } else if (prediction.phase === 'resolved') tell('The picture is still settling.', 2);
   }
   updateObjective();
   return true;
@@ -506,7 +602,7 @@ canvas.addEventListener('pointerleave', () => {
   $('#hoverHint').textContent = '';
 });
 canvas.addEventListener('pointerdown', (e) => {
-  if (mode !== 'play') return;
+  if (mode !== 'play' || controlLocked()) return;
   let { u, v } = pointer(e),
     o = objectAt(u, v),
     s = scenes[sceneIndex],
@@ -583,6 +679,50 @@ function encounterEvent(event) {
     note(320, 0.25, 0.04);
   }
 }
+// While a sequence holds the player (the monitor insert shot), input is ignored.
+function controlLocked() {
+  return sceneIndex === 2 && controlHeld(prediction);
+}
+function predictionEvent(event) {
+  const here = sceneIndex === 2;
+  if (event === 'released') {
+    say(
+      'The picture is seven seconds ahead. On it, you are standing on the tape mark at the microphone. Go to it, or stay where you are.',
+      LEAD,
+      5,
+    );
+    noise(0.05, 0.25, 0.3, 2400);
+  } else if (event === 'tick') {
+    note(620 + prediction.lastTick * 45, 0.05, 0.05, 'square');
+  } else if (event === 'followed') {
+    say(
+      'The picture catches up with you. On the monitor and in the room, your hand is on the microphone.',
+      6,
+      5,
+    );
+    for (const f of [220, 277, 330]) note(f, 2.6, 0.04);
+  } else if (event === 'resisted') {
+    say(
+      here
+        ? 'You stay where you are. On the monitor, you take the microphone anyway. Then the figure on the screen turns and looks at you.'
+        : 'Behind you, in Studio 001, a microphone switches on without you.',
+      7,
+      5,
+    );
+    noise(0.14, 1.1, -0.3, 3200);
+    note(49, 2.5, 0.08, 'sawtooth');
+    feedTearUntil = time + 1.2;
+  } else if (event === 'ready' && here) {
+    say(
+      prediction.outcome === 'followed'
+        ? 'The microphone is live. It is waiting for you.'
+        : 'The microphone is waiting for you.',
+      5,
+      2,
+    );
+  }
+  updateObjective();
+}
 function update(dt) {
   if (mode === 'transition') {
     transitionClock += dt;
@@ -607,10 +747,7 @@ function update(dt) {
   }
   if (mode !== 'play') return;
   time += dt;
-  if (time > subtitleUntil) {
-    setText('#subtitle', '');
-    subtitlePriority = 0;
-  }
+  advanceSubtitles();
   if (time > statusUntil)
     setText(
       '#status',
@@ -620,14 +757,21 @@ function update(dt) {
           ? 'TRANSMITTING'
           : 'SIGNAL DETECTED',
     );
-  player.running = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const locked = controlLocked();
+  if (locked) {
+    path = [];
+    queuedAction = null;
+  }
+  player.running = !locked && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
   let speed = player.running ? 3.9 : 2.35,
-    mx =
-      (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) -
-      (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0),
-    my =
-      (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) -
-      (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0);
+    mx = locked
+      ? 0
+      : (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) -
+        (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0),
+    my = locked
+      ? 0
+      : (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) -
+        (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0);
   player.moving = false;
   if (queuedAction && !mx && !my) {
     let object = interactables.find((o) => o.id === queuedAction);
@@ -672,7 +816,10 @@ function update(dt) {
     } else move((dx / d) * Math.min(d, speed * dt), (dz / d) * Math.min(d, speed * dt), dt);
   } else player.facing = turnToward(player.facing, player.desiredFacing, dt);
   for (let event of updateBroadcast(broadcast, dt, player, sceneIndex)) encounterEvent(event);
-  interaction = nearby();
+  for (const event of updatePrediction(prediction, dt, player, sceneIndex === 2))
+    predictionEvent(event);
+  if (mode !== 'play') return;
+  interaction = controlLocked() ? null : nearby();
   let hoverObject = interactables.find((o) => o.id === hovered && o.scene === sceneIndex);
   setText(
     '#hoverHint',
@@ -680,9 +827,19 @@ function update(dt) {
   );
   setHidden('#interaction', !interaction);
   if (interaction) setText('#interaction span', label(interaction));
-  let danger = sceneIndex === 0 && ['warning', 'live'].includes(broadcast.phase);
-  setHidden('#broadcastPanel', !danger);
-  if (danger) {
+  let danger = sceneIndex === 0 && ['warning', 'live'].includes(broadcast.phase),
+    forecast = sceneIndex === 2 && prediction.phase === 'countdown';
+  setHidden('#broadcastPanel', !danger && !forecast);
+  if (forecast) {
+    setText(
+      '#broadcastTimer',
+      'SEVEN SECONDS AHEAD / ' + Math.ceil(predictionRemaining(prediction)),
+    );
+    setText(
+      '#broadcastHelp',
+      atMark(player) ? 'YOU ARE ON THE TAPE MARK' : 'THE MONITOR SHOWS YOU AT THE MICROPHONE',
+    );
+  } else if (danger) {
     setText(
       '#broadcastTimer',
       broadcast.phase === 'warning'
@@ -874,39 +1031,165 @@ function drawStreetProps() {
     ctx.stroke();
   }
 }
-function drawMonitor() {
-  // The CRT picture is clipped to the physical glass in the background.
-  ctx.save();
-  polygon([
+// The studio monitor is a CCTV feed of this room, framed on the desk. It shows the present
+// until the player examines it; then it runs seven seconds ahead (see prediction.js).
+const GLASS = [
     [0.719, 0.364],
     [0.777, 0.37],
     [0.776, 0.447],
     [0.719, 0.443],
-  ]);
-  ctx.clip();
-  let x = 0.716 * W,
-    y = 0.36 * H,
-    w = 0.065 * W,
-    h = 0.091 * H;
-  ctx.drawImage(assets.studio, x, y, w, h);
-  if (actor) {
-    let future = { ...player, x: 0, z: 14.8, facing: Math.PI * 0.25, moving: false };
-    actor.draw(ctx, future, x + w * 0.57, y + h * 0.95, h * 0.55, 'warm', time + 7);
+  ],
+  FEED_BOX = { x: 0.716, y: 0.36, w: 0.065, h: 0.091 },
+  FEED_VIEW = { u0: 0.53, v0: 0.4, u1: 0.83, v1: 0.82 }; // same 1.28 aspect as the glass
+function facingTo(a, b) {
+  const s = scenes[2],
+    p = screenPoint(s, a.x, a.z),
+    q = screenPoint(s, b.x, b.z);
+  return Math.atan2(q.u - p.u, -(q.v - p.v));
+}
+// Tape cross on the studio floor. `map` converts frame coordinates to canvas pixels.
+function drawTapeMark(map, glow) {
+  const s = scenes[2],
+    r = 0.32;
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (const [ax, az, bx, bz] of [
+    [-r, -r, r, r],
+    [-r, r, r, -r],
+  ]) {
+    const a = screenPoint(s, MARK.x + ax, MARK.z + az),
+      b = screenPoint(s, MARK.x + bx, MARK.z + bz),
+      [x0, y0] = map(a.u, a.v),
+      [x1, y1] = map(b.u, b.v);
+    ctx.strokeStyle = `rgba(222,204,146,${0.55 + glow * 0.45})`;
+    ctx.lineWidth = Math.max(1.5, Math.hypot(x1 - x0, y1 - y0) * 0.09);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
   }
-  ctx.fillStyle = 'rgba(20,72,40,.28)';
+  ctx.restore();
+}
+const roomMap = (u, v) => [u * W, v * H];
+function drawMonitor() {
+  const x = FEED_BOX.x * W,
+    y = FEED_BOX.y * H,
+    w = FEED_BOX.w * W,
+    h = FEED_BOX.h * H,
+    fv = FEED_VIEW,
+    sx = w / ((fv.u1 - fv.u0) * W),
+    sy = h / ((fv.v1 - fv.v0) * H),
+    img = assets.studio,
+    s = scenes[2],
+    synced = prediction.phase === 'resolved' && prediction.outcome === 'followed',
+    resisted = prediction.outcome === 'resisted';
+  ctx.save();
+  polygon(GLASS);
+  ctx.clip();
+  ctx.drawImage(
+    img,
+    fv.u0 * img.width,
+    fv.v0 * img.height,
+    (fv.u1 - fv.u0) * img.width,
+    (fv.v1 - fv.v0) * img.height,
+    x,
+    y,
+    w,
+    h,
+  );
+  drawTapeMark((u, v) => [x + (u - fv.u0) * W * sx, y + (v - fv.v0) * H * sy], 0.3);
+  if (actor) {
+    feedFigure(prediction, player, feedActor, facingTo);
+    const p = screenPoint(s, feedActor.x, feedActor.z),
+      d = project(s.h, feedActor.x, feedActor.z).d;
+    actor.draw(
+      ctx,
+      feedActor,
+      x + (p.u - fv.u0) * W * sx,
+      y + (p.v - fv.v0) * H * sy,
+      ((s.nearHeight * H) / d) * sy,
+      'neutral',
+      time,
+    );
+  }
+  ctx.fillStyle = synced ? 'rgba(122,62,24,.24)' : 'rgba(20,72,40,.32)';
   ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = '#a9c8a2';
-  ctx.font = Math.max(4, H * 0.006) + 'px monospace';
-  ctx.fillText('+00:07', x + w * 0.04, y + h * 0.13);
+  if (time < feedTearUntil || (resisted && !reduced && Math.sin(time * 2.3) > 0.985)) {
+    for (let i = 0; i < 9; i++) {
+      ctx.fillStyle = `rgba(205,222,205,${0.12 + random() * 0.3})`;
+      ctx.fillRect(x + (random() - 0.5) * w * 0.2, y + random() * h, w, Math.max(1, h * 0.02));
+    }
+  }
   ctx.strokeStyle = '#061a0990';
+  ctx.lineWidth = Math.max(0.5, h / 90);
   for (let i = 0; i < 15; i++) {
-    let yy = y + (i / 15) * h;
+    const yy = y + (i / 15) * h;
     ctx.beginPath();
     ctx.moveTo(x, yy);
     ctx.lineTo(x + w, yy);
     ctx.stroke();
   }
+  ctx.fillStyle = synced ? '#f0c9a0' : '#cfe3c8';
+  ctx.font = `${Math.max(5, h * 0.13)}px monospace`;
+  ctx.fillText(
+    prediction.phase === 'idle' ? 'LIVE' : synced ? '+00:00' : '+00:07',
+    x + w * 0.05,
+    y + h * 0.17,
+  );
+  if (Math.floor(time * 2) % 2 === 0) {
+    ctx.fillStyle = '#d5523c';
+    ctx.beginPath();
+    ctx.arc(x + w * 0.9, y + h * 0.12, h * 0.035, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
+}
+// How strongly the studio's ON AIR sign burns, from the state of the prediction.
+function onAirLevel() {
+  const pr = prediction;
+  if (pr.phase === 'idle') return 0;
+  if (pr.phase === 'preview') return 0.05;
+  if (pr.phase === 'countdown')
+    return reduced ? 0.08 : 0.03 + 0.1 * Math.max(0, 1 - (pr.clock % 1) * 3);
+  if (pr.outcome === 'followed') return 0.14;
+  return reduced ? 0.04 : Math.sin(time * 17) * Math.sin(time * 5.3) > 0.2 ? 0.1 : 0.01;
+}
+function drawStudio() {
+  drawTapeMark(roomMap, prediction.phase === 'countdown' ? onAirLevel() * 5 : 0);
+  drawMonitor();
+  const level = onAirLevel();
+  if (level > 0) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    softLight(0.787, 0.144, 0.075, '187,47,28', level);
+    // Followed: the microphone's tally lamp and the desk light answer the player.
+    if (prediction.outcome === 'followed') {
+      softLight(0.648, 0.352, 0.012, '235,60,40', 0.9);
+      softLight(0.64, 0.5, 0.2, '226,150,90', 0.07);
+    }
+    ctx.restore();
+  }
+}
+// Insert shot: while the monitor shows the future, the camera cuts in close on the screen.
+function drawInsertShot() {
+  const Z = 3.3,
+    t = prediction.clock,
+    length = prediction.phase === 'preview' ? PREVIEW : RESIST_INSERT;
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(Z, Z);
+  ctx.translate(-0.748 * W, -0.405 * H);
+  ctx.drawImage(assets.studio, 0, 0, W, H);
+  drawMonitor();
+  ctx.restore();
+  ctx.fillStyle = '#020304';
+  ctx.fillRect(0, 0, W, H * 0.08);
+  ctx.fillRect(0, H * 0.92, W, H * 0.08);
+  const fade = Math.max(0, 1 - t / 0.3, 1 - (length - t) / 0.3);
+  if (fade > 0) {
+    ctx.fillStyle = `rgba(2,3,4,${Math.min(1, fade)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
 }
 function environment() {
   if (sceneIndex === 0) {
@@ -928,15 +1211,7 @@ function environment() {
     softLight(0.744, 0.5, 0.11, '74,158,171', 0.025);
     ctx.restore();
   }
-  if (sceneIndex === 2) {
-    drawMonitor();
-    if (facts.monitor) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'screen';
-      softLight(0.787, 0.144, 0.075, '187,47,28', 0.06);
-      ctx.restore();
-    }
-  }
+  if (sceneIndex === 2) drawStudio();
   if (!reduced && sceneIndex === 0) {
     ctx.save();
     ctx.globalAlpha = 0.7;
@@ -1005,11 +1280,16 @@ function render(now) {
   }
   if (ready) {
     const s = scenes[sceneIndex];
-    ctx.drawImage(assets[s.id], 0, 0, W, H);
-    environment();
-    if (mode !== 'title') drawActor();
-    drawMarker();
-    weather();
+    const cinematic = sceneIndex === 2 && insertShot(prediction);
+    $('#hud').classList.toggle('cinematic', cinematic);
+    if (cinematic) drawInsertShot();
+    else {
+      ctx.drawImage(assets[s.id], 0, 0, W, H);
+      environment();
+      if (mode !== 'title') drawActor();
+      drawMarker();
+      weather();
+    }
     if (time < flashUntil && !reduced) {
       ctx.fillStyle = 'rgba(158,171,161,.10)';
       ctx.fillRect(0, 0, W, H);
