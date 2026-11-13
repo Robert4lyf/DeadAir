@@ -48,8 +48,15 @@ const elements = new Map(),
   canvas = $('#scene'),
   ctx = canvas.getContext('2d', { alpha: false }),
   frame = $('#frame'),
-  reduced = matchMedia('(prefers-reduced-motion: reduce)').matches,
-  touch = matchMedia('(pointer:coarse)').matches;
+  reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Touch UI (labelled buttons instead of key hints). Hybrid devices switch on first touch.
+let touch = matchMedia('(pointer:coarse)').matches;
+function useTouch(on) {
+  touch = on;
+  frame.classList.toggle('touch', on);
+  if (mode === 'play') $('#touch').hidden = !on;
+}
+frame.classList.toggle('touch', touch);
 let W = 1280,
   H = 720,
   assets = {},
@@ -94,7 +101,8 @@ function setHidden(selector, hidden) {
 }
 // Dialogs take focus when they open, keep Tab inside, and hand focus back on close.
 const dialogs = ['#modal', '#decision', '#ending', '#error'];
-let dialogReturn = null;
+let dialogReturn = null,
+  dialogClosedAt = -1e9; // a tap that closes a dialog must not also walk the player
 function openDialog(selector) {
   const el = $(selector);
   if (!el.hidden) return;
@@ -106,6 +114,7 @@ function closeDialog(selector) {
   const el = $(selector);
   if (el.hidden) return;
   el.hidden = true;
+  dialogClosedAt = performance.now();
   if (dialogReturn?.isConnected && !dialogReturn.closest('[hidden]')) dialogReturn.focus();
   dialogReturn = null;
 }
@@ -617,6 +626,7 @@ function restart() {
 }
 function toggleTorch() {
   torch = !torch;
+  $('#touchTorch').setAttribute('aria-pressed', String(torch));
   status(torch ? 'TORCH ON' : 'TORCH OFF');
   note(180, 0.04, 0.035);
 }
@@ -637,7 +647,7 @@ $('#sound').onclick = () => {
     master.gain.setTargetAtTime(muted || mode === 'pause' ? 0 : 0.42, audio.currentTime, 0.1);
 };
 $('#restart').onclick = restart;
-$('#touchAction').onclick = () => interact();
+$('#interaction').onclick = () => interact();
 $('#touchTorch').onclick = toggleTorch;
 $('#speak').onclick = () => finish('speak');
 $('#silence').onclick = () => finish('silence');
@@ -688,16 +698,23 @@ function pointer(e) {
   let r = canvas.getBoundingClientRect();
   return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height };
 }
-function objectAt(u, v) {
-  return interactables.find(
-    (o) =>
-      o.scene === sceneIndex &&
-      o.rect &&
-      u >= o.rect[0] &&
-      u <= o.rect[2] &&
-      v >= o.rect[1] &&
-      v <= o.rect[3],
-  );
+// Small world objects get a forgiving hit area (in CSS pixels); the nearest object wins, so
+// padded areas never make a tap ambiguous.
+function objectAt(u, v, pad = 4) {
+  const r = canvas.getBoundingClientRect();
+  let best = null,
+    bestDistance = Infinity;
+  for (const o of interactables) {
+    if (o.scene !== sceneIndex || !o.rect) continue;
+    const dx = Math.max(o.rect[0] - u, 0, u - o.rect[2]) * r.width,
+      dy = Math.max(o.rect[1] - v, 0, v - o.rect[3]) * r.height,
+      d = Math.hypot(dx, dy);
+    if (d <= pad && d < bestDistance) {
+      best = o;
+      bestDistance = d;
+    }
+  }
+  return best;
 }
 canvas.addEventListener('pointermove', (e) => {
   if (mode !== 'play') return;
@@ -717,9 +734,10 @@ canvas.addEventListener('pointerleave', () => {
   $('#hoverHint').textContent = '';
 });
 canvas.addEventListener('pointerdown', (e) => {
-  if (mode !== 'play' || controlLocked()) return;
+  if (e.pointerType === 'touch' && !touch) useTouch(true);
+  if (mode !== 'play' || controlLocked() || performance.now() - dialogClosedAt < 400) return;
   let { u, v } = pointer(e),
-    o = objectAt(u, v),
+    o = objectAt(u, v, e.pointerType === 'touch' ? 22 : 4),
     s = scenes[sceneIndex],
     p = o ? { x: o.x, z: o.z } : groundPoint(s, u, v);
   if (!p || blocked(s, p.x, p.z)) {

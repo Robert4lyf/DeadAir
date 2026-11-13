@@ -400,7 +400,7 @@ export const interactables = [
     x: 0,
     z: 23.4,
     reach: 1.65,
-    rect: [0.55, 0.58, 0.67, 0.645],
+    rect: [0.55, 0.58, 0.645, 0.645],
   },
   {
     id: 'backStreet',

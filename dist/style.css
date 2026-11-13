@@ -2,6 +2,11 @@
 :root {
   /* 1% of the 16:9 game frame's width; text scales with the frame. */
   --fw: min(1vw, 1.7778vh);
+  --fw: min(1vw, 1.7778dvh);
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
   --text-xs: clamp(10px, calc(var(--fw) * 0.8), 14px);
   --text-sm: clamp(11px, calc(var(--fw) * 0.88), 15px);
   --text-md: clamp(12px, calc(var(--fw) * 0.98), 17px);
@@ -28,13 +33,15 @@ body {
     11px 'IBM Plex Mono',
     monospace;
 }
+/* Centred without a transform, so fixed-position overlays can use the whole viewport. */
 #frame {
   position: absolute;
+  inset: 0;
+  margin: auto;
   width: min(100vw, 177.77778vh);
   height: min(56.25vw, 100vh);
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  width: min(100vw, 177.77778dvh);
+  height: min(56.25vw, 100dvh);
   overflow: hidden;
   background: #10161b;
 }
@@ -660,4 +667,216 @@ kbd {
 /* Insert shots: only the subtitle stays over the picture. */
 #hud.cinematic > :not(#subtitle) {
   visibility: hidden;
+}
+
+/* Overlay text never swallows a tap meant for the ground behind it. */
+.chapter,
+.objective,
+#subtitle,
+#hoverHint,
+#broadcastPanel {
+  pointer-events: none;
+}
+/* The interaction prompt is also a button: tap or click it to use the object. */
+#interaction {
+  font: inherit;
+  font-size: var(--text-md);
+  color: inherit;
+  cursor: pointer;
+  min-height: 40px;
+}
+#interaction:hover {
+  border-color: #aebfbe88;
+}
+#touch button {
+  width: auto;
+  min-width: 64px;
+  height: 48px;
+  border-radius: 24px;
+  padding: 0 16px;
+  font-size: var(--text-sm);
+  letter-spacing: 1.5px;
+}
+#rotateHint {
+  display: none;
+}
+.touch-only,
+#frame.touch .kbd-only,
+#frame.touch #interaction kbd,
+#frame.touch .keys {
+  display: none;
+}
+#frame.touch .touch-only {
+  display: grid;
+}
+/* Keep HUD edges clear of notches and the home indicator. */
+header {
+  left: max(3%, calc(var(--safe-l) + 8px));
+  right: max(3%, calc(var(--safe-r) + 8px));
+}
+.bottom {
+  bottom: max(4%, calc(var(--safe-b) + 6px));
+}
+#touch {
+  right: max(4%, calc(var(--safe-r) + 12px));
+}
+
+/* Portrait phones: the picture sits on top; title, text and controls use the space below it
+   instead of shrinking over a picture a third of the screen tall. */
+@media (orientation: portrait) and (max-width: 820px) {
+  :root {
+    --pic-top: calc(var(--safe-t) + 58px);
+    --below: calc(var(--pic-top) + 56.25vw);
+  }
+  #frame {
+    inset: auto;
+    top: var(--pic-top);
+    left: 0;
+    margin: 0;
+    width: 100vw;
+    height: 56.25vw;
+    overflow: visible;
+  }
+  header {
+    position: fixed;
+    top: calc(var(--safe-t) + 10px);
+    left: 16px;
+    right: 16px;
+  }
+  header button {
+    min-height: 40px;
+    min-width: 44px;
+    font-size: 11px;
+  }
+  #title {
+    position: fixed;
+    top: calc(var(--below) + 28px);
+    left: 20px;
+    right: 20px;
+  }
+  #title:before {
+    display: none;
+  }
+  #title h1 {
+    font-size: 64px;
+  }
+  #title p {
+    font-size: 13px;
+  }
+  .modal,
+  #error {
+    position: fixed;
+  }
+  .card {
+    width: 100%;
+    max-height: 100%;
+  }
+  #hud {
+    position: fixed;
+    top: var(--below);
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px 20px calc(var(--safe-b) + 120px);
+    overflow-y: auto;
+  }
+  #hud > * {
+    position: static;
+    transform: none;
+    width: auto;
+    max-width: none;
+  }
+  .chapter {
+    order: 1;
+  }
+  .chapter h2 {
+    font-size: 22px;
+  }
+  .objective {
+    order: 2;
+    text-align: left;
+  }
+  #broadcastPanel {
+    order: 3;
+    max-width: none;
+  }
+  #subtitle {
+    order: 4;
+    background: none;
+    padding: 0;
+    text-align: left;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  #hoverHint,
+  .bottom {
+    display: none;
+  }
+  #interaction {
+    position: fixed;
+    left: 20px;
+    right: 120px;
+    bottom: calc(var(--safe-b) + 20px);
+    min-height: 52px;
+    font-size: 14px;
+    white-space: normal;
+    text-align: left;
+  }
+  #touch {
+    position: fixed;
+    right: 20px;
+    bottom: calc(var(--safe-b) + 20px);
+  }
+  #touch button {
+    height: 52px;
+  }
+  #rotateHint {
+    display: block;
+    position: fixed;
+    left: 20px;
+    right: 20px;
+    bottom: calc(var(--safe-b) + 84px);
+    margin: 0;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    color: #9fb0b0;
+    text-align: center;
+    pointer-events: none;
+  }
+  #hud.cinematic > :not(#subtitle) {
+    visibility: hidden;
+  }
+}
+
+@media (pointer: coarse) {
+  header button {
+    min-height: 40px;
+    min-width: 44px;
+  }
+}
+/* Short landscape phones: keep the title's start button on screen, and the torch control
+   above the subtitle line. */
+@media (max-height: 430px) and (orientation: landscape) {
+  #title {
+    top: 15%;
+  }
+  #title h1 {
+    font-size: 58px;
+    margin: 10px 0 12px;
+  }
+  #title p {
+    margin-bottom: 12px;
+    line-height: 1.6;
+  }
+  #title .eyebrow {
+    font-size: 9px;
+  }
+}
+@media (orientation: landscape) {
+  #frame.touch #touch {
+    bottom: 27%;
+  }
 }

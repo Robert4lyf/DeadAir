@@ -48,7 +48,9 @@
           <strong id="broadcastTimer"></strong><span id="broadcastHelp"></span>
         </div>
         <div id="hoverHint"></div>
-        <div id="interaction" hidden><kbd>E</kbd><span>Continue toward the tower</span></div>
+        <button id="interaction" type="button" hidden>
+          <kbd>E</kbd><span>Continue toward the tower</span>
+        </button>
         <div id="subtitle" role="status"></div>
         <div class="bottom">
           <span class="record"><i></i> <span id="status">SIGNAL DETECTED</span></span
@@ -74,20 +76,29 @@
             broadcast warns you, shelter beneath the shop awning or cut the service feed. Then cross
             toward the tower.
           </p>
-          <dl>
+          <dl class="kbd-only">
             <dt>Move</dt>
             <dd>WASD or arrow keys</dd>
             <dt>Walk to a point</dt>
-            <dd>Click / tap the ground</dd>
+            <dd>Click the ground</dd>
             <dt>Run / Torch</dt>
             <dd>Shift / F</dd>
-            <dt>Interact / Pause</dt>
+            <dt>Use / Pause</dt>
             <dd>E / Esc</dd>
           </dl>
+          <dl class="touch-only">
+            <dt>Walk</dt>
+            <dd>Tap the ground</dd>
+            <dt>Use</dt>
+            <dd>Tap an object or the prompt</dd>
+            <dt>Torch</dt>
+            <dd>TORCH button</dd>
+            <dt>Pause</dt>
+            <dd>? button</dd>
+          </dl>
           <p class="muted">
-            Click an object to walk over and use it, or press E nearby. A red cross marks an
-            unreachable destination. In the studio, look at the monitor before taking the
-            microphone.
+            Objects are used by walking up to them. A red cross marks an unreachable destination. In
+            the studio, the monitor shows the room; watch it, then decide whether to follow it.
           </p>
           <button id="resume" class="primary">RETURN TO THE STREET <span>↗</span></button>
         </div>
@@ -132,9 +143,9 @@
         <button id="retry" class="primary">RETRY</button>
       </div>
       <div id="touch" hidden>
-        <button id="touchTorch" aria-label="Toggle torch">F</button
-        ><button id="touchAction" aria-label="Interact">E</button>
+        <button id="touchTorch" type="button" aria-pressed="true">TORCH</button>
       </div>
+      <p id="rotateHint">Turn your phone sideways for the full picture</p>
     </div>
     <script type="module" src="game.js"></script>
   </body>

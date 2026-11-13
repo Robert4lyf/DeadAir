@@ -47,8 +47,10 @@ const ctx2d = new Proxy(
 );
 
 function makeNode(selector) {
-  const classes = new Set();
+  const classes = new Set(),
+    listeners = {};
   return {
+    listeners,
     hidden: hiddenAtStart.includes(selector),
     disabled: false,
     style: { setProperty() {} },
@@ -62,7 +64,7 @@ function makeNode(selector) {
       toggle: (c, on = !classes.has(c)) => (on ? classes.add(c) : classes.delete(c), on),
       contains: (c) => classes.has(c),
     },
-    addEventListener() {},
+    addEventListener: (type, fn) => (listeners[type] ??= []).push(fn),
     setAttribute() {},
     removeAttribute() {},
     focus() {},
@@ -149,9 +151,16 @@ export async function bootGame() {
   });
   const run = (code) => vm.runInContext(code, sandbox, { timeout: 20000 });
   run('ready = true; enter();');
+  const el = (s) => document.querySelector(s);
   return {
     run,
     document,
+    // A finger tap on the picture at frame coordinates (u, v).
+    tap: (u, v) =>
+      el('#scene').listeners.pointerdown?.forEach((fn) =>
+        fn({ clientX: u * 1280, clientY: v * 720, pointerType: 'touch' }),
+      ),
+    click: (s) => el(s).onclick?.(),
     el: (s) => document.querySelector(s),
     fireWindow: (type, event = {}) => windowListeners[type]?.forEach((fn) => fn(event)),
     fireDocument: (type, event = {}) => documentListeners[type]?.forEach((fn) => fn(event)),
