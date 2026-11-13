@@ -5,7 +5,9 @@
   "type": "module",
   "description": "Fixed-camera industrial noir horror prototype",
   "scripts": {
-    "test": "node --test tests/*.mjs"
+    "test": "node --test tests/*.mjs",
+    "format": "npx prettier@3.3.3 --write .",
+    "format:check": "npx prettier@3.3.3 --check ."
   },
   "engines": {
     "node": ">=22"
