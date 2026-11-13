@@ -13,7 +13,7 @@
   </head>
   <body>
     <div id="frame">
-      <canvas id="scene" aria-label="Fixed-camera view of the rainy city"></canvas>
+      <canvas id="scene" role="img" aria-label="Fixed-camera view of the rainy city"></canvas>
       <div class="vignette"></div>
       <div id="fade"></div>
       <header>
@@ -58,11 +58,10 @@
           ><span class="clickhint">CLICK / TAP THE GROUND TO WALK</span>
         </div>
       </div>
-      <div id="caption" hidden><span>02 / BROADCAST PLAZA</span></div>
-      <div id="modal" class="modal" hidden>
+      <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" hidden>
         <div class="card">
           <div class="eyebrow">FIELD MANUAL / 108.9 FM</div>
-          <h2>Stay with<br />the signal.</h2>
+          <h2 id="modalTitle">Stay with<br />the signal.</h2>
           <p>
             Inspect the curfew notice, service intercom and breaker on the right-hand wall. When the
             broadcast warns you, shelter beneath the shop awning or cut the service feed. Then cross
@@ -86,19 +85,19 @@
           <button id="resume" class="primary">RETURN TO THE STREET <span>↗</span></button>
         </div>
       </div>
-      <div id="decision" class="modal" hidden>
+      <div id="decision" class="modal" role="dialog" aria-modal="true" aria-labelledby="decisionTitle" hidden>
         <div class="card">
           <div class="eyebrow">STUDIO 001 / LIVE</div>
-          <h2>The lamp<br />is waiting.</h2>
+          <h2 id="decisionTitle">The lamp<br />is waiting.</h2>
           <p>On the monitor, your hand reaches for the microphone seven seconds before you move.</p>
           <button id="speak" class="primary">SPEAK INTO THE MICROPHONE <span>↗</span></button
           ><button id="silence" class="secondary">STAY SILENT</button>
         </div>
       </div>
-      <div id="ending" class="modal" hidden>
+      <div id="ending" class="modal" role="dialog" aria-modal="true" aria-labelledby="endingTitle" hidden>
         <div class="card">
           <div class="eyebrow">DEAD AIR / STUDIO 001</div>
-          <h2>You were<br />expected.</h2>
+          <h2 id="endingTitle">You were<br />expected.</h2>
           <p>Outside, the rain stops.<br />A red lamp illuminates.</p>
           <p class="quote" id="endLine">“You’ve been on air since you left home.”</p>
           <div class="endnote">END OF THE DEAD AIR DEMO</div>
@@ -106,13 +105,13 @@
         </div>
       </div>
       <div id="loading" role="status"><span>RECEIVING PICTURE</span><i></i></div>
-      <div id="error" hidden>
-        <p>The picture could not be loaded.</p>
+      <div id="error" role="alertdialog" aria-labelledby="errorText" hidden>
+        <p id="errorText">The picture could not be loaded.</p>
         <button id="retry" class="primary">RETRY</button>
       </div>
       <div id="touch" hidden>
         <button id="touchTorch" aria-label="Toggle torch">F</button
-        ><button id="touchAction" aria-label="Continue">E</button>
+        ><button id="touchAction" aria-label="Interact">E</button>
       </div>
     </div>
     <script type="module" src="game.js"></script>

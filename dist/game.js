@@ -15,7 +15,11 @@ import {
   inShelter,
 } from './encounter.js';
 import { SpriteActor, turnToward } from './sprites.js';
-const $ = (s) => document.querySelector(s),
+const elements = new Map(),
+  $ = (s) => {
+    if (!elements.has(s)) elements.set(s, document.querySelector(s));
+    return elements.get(s);
+  },
   canvas = $('#scene'),
   ctx = canvas.getContext('2d', { alpha: false }),
   frame = $('#frame'),
@@ -37,7 +41,6 @@ let W = 1280,
   hovered = null,
   torch = true,
   muted = false,
-  footTime = 0,
   marker = null,
   transitionClock = 0,
   transitionTarget = 1,
@@ -47,12 +50,54 @@ let W = 1280,
   subtitlePriority = 0,
   statusUntil = 0,
   flashUntil = 0,
-  monitorAt = -1;
+  monitorAt = -1,
+  arrivalGuard = null; // the exit just used; it gets no prompt until the player steps away
 let player = makePlayer(scenes[0].spawn),
   broadcast = createBroadcast(),
-  facts = { notice: false, intercom: false, breaker: false, monitor: false },
-  history = [],
-  historyAt = 0;
+  facts = { notice: false, intercom: false, breaker: false, monitor: false };
+// Per-frame HUD updates only touch the DOM when a value actually changes.
+function setText(selector, text) {
+  const el = $(selector);
+  if (el.textContent !== text) el.textContent = text;
+}
+function setHidden(selector, hidden) {
+  const el = $(selector);
+  if (el.hidden !== hidden) el.hidden = hidden;
+}
+// Dialogs take focus when they open, keep Tab inside, and hand focus back on close.
+const dialogs = ['#modal', '#decision', '#ending', '#error'];
+let dialogReturn = null;
+function openDialog(selector) {
+  const el = $(selector);
+  if (!el.hidden) return;
+  dialogReturn = document.activeElement;
+  el.hidden = false;
+  el.querySelector('button')?.focus();
+}
+function closeDialog(selector) {
+  const el = $(selector);
+  if (el.hidden) return;
+  el.hidden = true;
+  if (dialogReturn?.isConnected && !dialogReturn.closest('[hidden]')) dialogReturn.focus();
+  dialogReturn = null;
+}
+function trapFocus(e) {
+  const open = dialogs.map($).find((el) => !el.hidden);
+  if (!open) return;
+  const buttons = [...open.querySelectorAll('button')],
+    first = buttons[0],
+    last = buttons[buttons.length - 1];
+  if (!buttons.includes(document.activeElement)) {
+    e.preventDefault();
+    first.focus();
+  } else if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
 function makePlayer(p, facing = 0) {
   return { x: p.x, z: p.z, facing, desiredFacing: facing, phase: 0, moving: false, running: false };
 }
@@ -78,7 +123,7 @@ function loadImage(src) {
 }
 async function load() {
   try {
-    $('#error').hidden = true;
+    closeDialog('#error');
     $('#loading').hidden = false;
     const names = ['street', 'plaza', 'studio', 'idle', 'walk', 'run'];
     let images = await Promise.all(names.map((n) => loadImage('./art/' + n + '.webp')));
@@ -91,7 +136,7 @@ async function load() {
   } catch (error) {
     console.error('Picture loading failed', error);
     $('#loading').hidden = true;
-    $('#error').hidden = false;
+    openDialog('#error');
   }
 }
 $('#retry').onclick = load;
@@ -175,10 +220,13 @@ function setChapter() {
   updateObjective();
 }
 function updateObjective() {
-  $('#objectiveLead').textContent = sceneIndex === 2 ? 'STUDIO' : 'REACH';
-  $('#objectiveTitle').textContent =
-    sceneIndex === 2 ? (facts.monitor ? 'THE MICROPHONE' : 'THE MONITOR') : 'STUDIO 001';
-  $('#distance').textContent =
+  setText('#objectiveLead', sceneIndex === 2 ? 'STUDIO' : 'REACH');
+  setText(
+    '#objectiveTitle',
+    sceneIndex === 2 ? (facts.monitor ? 'THE MICROPHONE' : 'THE MONITOR') : 'STUDIO 001',
+  );
+  setText(
+    '#distance',
     sceneIndex === 2
       ? facts.monitor
         ? 'THE PICTURE IS SEVEN SECONDS AHEAD'
@@ -189,7 +237,8 @@ function updateObjective() {
           ? 'CROSSING OPEN / FOLLOW THE TOWER'
           : broadcast.phase === 'dormant'
             ? 'FOLLOW THE TOWER / INSPECT THE STREET'
-            : 'FIND COVER OR CUT THE SERVICE FEED';
+            : 'FIND COVER OR CUT THE SERVICE FEED',
+  );
 }
 function enter() {
   if (!ready) return;
@@ -205,7 +254,8 @@ function pause(show = true) {
   if (!['play', 'pause'].includes(mode)) return;
   mode = show ? 'pause' : 'play';
   keys.clear();
-  $('#modal').hidden = !show;
+  if (show) openDialog('#modal');
+  else closeDialog('#modal');
   if (audio) master.gain.setTargetAtTime(show || muted ? 0 : 0.42, audio.currentTime, 0.1);
 }
 function changeScene(next) {
@@ -233,6 +283,14 @@ function applyTransition() {
   let p = screenPoint(scenes[sceneIndex], spawn.x, spawn.z),
     q = screenPoint(scenes[sceneIndex], spawn.x, spawn.z + (transitionFrom > sceneIndex ? -1 : 1));
   player = makePlayer(spawn, Math.atan2(q.u - p.u, -(q.v - p.v)));
+  arrivalGuard =
+    sceneIndex === 0
+      ? 'crossing'
+      : sceneIndex === 2
+        ? 'backPlaza'
+        : transitionFrom === 2
+          ? 'doors'
+          : 'backStreet';
   setChapter();
   if (audio) {
     rainGain.gain.setTargetAtTime(sceneIndex === 2 ? 0.012 : 0.11, audio.currentTime, 0.8);
@@ -249,6 +307,10 @@ function nearby() {
   for (let o of interactables) {
     if (o.scene !== sceneIndex) continue;
     let d = Math.hypot(player.x - o.x, player.z - o.z);
+    if (o.id === arrivalGuard) {
+      if (d < o.reach) continue;
+      arrivalGuard = null;
+    }
     if (d < o.reach && d < distance) {
       distance = d;
       best = o;
@@ -323,7 +385,7 @@ function interact(id = interaction?.id) {
       mode = 'choice';
       keys.clear();
       path = [];
-      $('#decision').hidden = false;
+      openDialog('#decision');
     }
   }
   updateObjective();
@@ -331,10 +393,10 @@ function interact(id = interaction?.id) {
 }
 function finish(choice) {
   mode = 'end';
-  $('#decision').hidden = true;
+  closeDialog('#decision');
   $('#hud').hidden = true;
   $('#touch').hidden = true;
-  $('#ending').hidden = false;
+  openDialog('#ending');
   $('#endLine').textContent =
     choice === 'speak'
       ? 'The speakers answer before your lips move. Your voice: “You never left the studio.”'
@@ -350,11 +412,11 @@ function toggleTorch() {
 $('#start').onclick = enter;
 $('#resume').onclick = () => {
   if (mode === 'pause') pause(false);
-  else $('#modal').hidden = true;
+  else closeDialog('#modal');
 };
 $('#help').onclick = () => {
   if (mode === 'play') pause(true);
-  else if (mode === 'title') $('#modal').hidden = false;
+  else if (mode === 'title') openDialog('#modal');
 };
 $('#sound').onclick = () => {
   muted = !muted;
@@ -368,14 +430,18 @@ $('#touchAction').onclick = () => interact();
 $('#touchTorch').onclick = toggleTorch;
 $('#speak').onclick = () => finish('speak');
 $('#silence').onclick = () => finish('silence');
+const gameKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'];
+// Outside play, keys keep their normal meaning so Space and Enter activate focused buttons.
+const playing = () => mode === 'play' || mode === 'transition';
 addEventListener('keydown', (e) => {
-  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code))
-    e.preventDefault();
+  if (e.key === 'Tab') trapFocus(e);
+  if (playing() && gameKeys.includes(e.code)) e.preventDefault();
   if (e.code === 'Escape' && !e.repeat) {
-    pause(mode !== 'pause');
+    if (mode === 'title') closeDialog('#modal');
+    else pause(mode !== 'pause');
     return;
   }
-  if (!['play', 'transition'].includes(mode)) return;
+  if (!playing()) return;
   if (
     [
       'KeyW',
@@ -395,7 +461,11 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyE' || e.code === 'Space') interact();
   if (e.code === 'KeyF') toggleTorch();
 });
-addEventListener('keyup', (e) => keys.delete(e.code));
+addEventListener('keyup', (e) => {
+  keys.delete(e.code);
+  // Space activates a focused button on keyup; during play it means Interact instead.
+  if (playing() && e.code === 'Space') e.preventDefault();
+});
 addEventListener('blur', () => {
   keys.clear();
   if (mode === 'play') pause(true);
@@ -538,16 +608,18 @@ function update(dt) {
   if (mode !== 'play') return;
   time += dt;
   if (time > subtitleUntil) {
-    $('#subtitle').textContent = '';
+    setText('#subtitle', '');
     subtitlePriority = 0;
   }
   if (time > statusUntil)
-    $('#status').textContent =
+    setText(
+      '#status',
       sceneIndex === 2
         ? 'STUDIO / LIVE'
         : broadcast.phase === 'live'
           ? 'TRANSMITTING'
-          : 'SIGNAL DETECTED';
+          : 'SIGNAL DETECTED',
+    );
   player.running = keys.has('ShiftLeft') || keys.has('ShiftRight');
   let speed = player.running ? 3.9 : 2.35,
     mx =
@@ -602,27 +674,27 @@ function update(dt) {
   for (let event of updateBroadcast(broadcast, dt, player, sceneIndex)) encounterEvent(event);
   interaction = nearby();
   let hoverObject = interactables.find((o) => o.id === hovered && o.scene === sceneIndex);
-  $('#hoverHint').textContent =
-    hoverObject && hoverObject.id !== interaction?.id ? label(hoverObject) : '';
-  $('#interaction').hidden = !interaction;
-  if (interaction) $('#interaction span').textContent = label(interaction);
+  setText(
+    '#hoverHint',
+    hoverObject && hoverObject.id !== interaction?.id ? label(hoverObject) : '',
+  );
+  setHidden('#interaction', !interaction);
+  if (interaction) setText('#interaction span', label(interaction));
   let danger = sceneIndex === 0 && ['warning', 'live'].includes(broadcast.phase);
-  $('#broadcastPanel').hidden = !danger;
+  setHidden('#broadcastPanel', !danger);
   if (danger) {
-    $('#broadcastTimer').textContent =
+    setText(
+      '#broadcastTimer',
       broadcast.phase === 'warning'
         ? 'TRANSMISSION IN ' + Math.ceil(broadcast.remaining)
-        : 'ON AIR / ' + Math.ceil(broadcast.remaining);
-    $('#broadcastHelp').textContent = inShelter(player)
-      ? 'IN SHADOW / STAY HERE'
-      : 'RIGHT-HAND AWNING OR SERVICE BREAKER';
+        : 'ON AIR / ' + Math.ceil(broadcast.remaining),
+    );
+    setText(
+      '#broadcastHelp',
+      inShelter(player) ? 'IN SHADOW / STAY HERE' : 'RIGHT-HAND AWNING OR SERVICE BREAKER',
+    );
   }
   updateObjective();
-  if (time - historyAt > 0.15) {
-    historyAt = time;
-    history.push({ scene: sceneIndex, x: player.x, z: player.z, facing: player.facing });
-    if (history.length > 80) history.shift();
-  }
 }
 function polygon(points) {
   ctx.beginPath();
@@ -933,13 +1005,6 @@ function render(now) {
   }
   if (ready) {
     const s = scenes[sceneIndex];
-    canvas.dataset.camera = s.id;
-    canvas.dataset.mode = mode;
-    canvas.dataset.position = player.x.toFixed(2) + ',' + player.z.toFixed(2);
-    canvas.dataset.broadcast = broadcast.phase;
-    canvas.dataset.facts = Object.keys(facts)
-      .filter((k) => facts[k])
-      .join(',');
     ctx.drawImage(assets[s.id], 0, 0, W, H);
     environment();
     if (mode !== 'title') drawActor();
@@ -957,13 +1022,3 @@ function render(now) {
   requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
-window.deadAirInfo = () => ({
-  mode,
-  scene: scenes[sceneIndex].id,
-  player: { x: player.x, z: player.z },
-  broadcast: { ...broadcast },
-  facts: { ...facts },
-  interaction: interaction?.id,
-  pathLength: path.length,
-  ready,
-});

@@ -10,9 +10,19 @@ const ctx = new Proxy(
   { createRadialGradient: () => gradient },
   { get: (o, k) => o[k] || (() => {}) },
 );
-function node() {
+// Elements that start hidden in index.html.
+const hiddenAtStart = [
+  '#hud',
+  '#modal',
+  '#decision',
+  '#ending',
+  '#error',
+  '#touch',
+  '#interaction',
+];
+function node(selector) {
   return {
-    hidden: false,
+    hidden: hiddenAtStart.includes(selector),
     disabled: false,
     style: {},
     dataset: {},
@@ -20,15 +30,21 @@ function node() {
     textContent: '',
     addEventListener() {},
     setAttribute() {},
+    focus() {},
+    closest: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    isConnected: true,
     getContext: () => ctx,
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 1280, height: 720 }),
   };
 }
 const document = {
   querySelector(s) {
-    if (!nodes.has(s)) nodes.set(s, node());
+    if (!nodes.has(s)) nodes.set(s, node(s));
     return nodes.get(s);
   },
+  activeElement: null,
   addEventListener() {},
 };
 const sandbox = {
@@ -107,11 +123,14 @@ assert(player.z >= 4, 'Plaza spawn must clear the bottom HUD');
 
 use('doors', () => sceneIndex === 2);
 until(() => mode === 'play');
+update(1 / 60);
+assert.equal(interaction, null, 'The exit just used must not prompt on arrival');
 
 use('monitor', () => facts.monitor);
 for (let i = 0; i < 300; i++) update(1 / 60);
 assert(interact('monitor'));
 assert.equal(mode, 'choice');
+assert.equal(document.querySelector('#decision').hidden, false);
 
 finish('silence');
 assert.equal(mode, 'end');
