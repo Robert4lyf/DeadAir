@@ -1048,11 +1048,11 @@ header {
   var AFTERMATH = 3.2;
   var RESIST_INSERT = 2.6;
   var MARK = { x: 0.15, z: 15.9 };
-  var MARK_RADIUS = 0.9;
-  var VIEW = { x: 2.05, z: 15.4 };
+  var MARK_RADIUS = 1.4;
+  var VIEW = { x: 1.3, z: 12 };
   var EPS = 1e-6;
-  var WALK_START = 0.7;
-  var WALK_END = PREVIEW - 1.1;
+  var WALK_START = 1.2;
+  var WALK_END = PREVIEW - 2;
   function createPrediction() {
     return {
       phase: "idle",
@@ -1119,7 +1119,7 @@ header {
     return events;
   }
   var ease = (t) => t * t * (3 - 2 * t);
-  function feedFigure(state, player2, out, facingTo2) {
+  function feedFigure(state, player2, out, facingTo2, stride = 5) {
     out.running = false;
     out.moving = false;
     if (state.phase === "idle" || state.phase === "resolved" && state.outcome === "followed") {
@@ -1136,7 +1136,7 @@ header {
       out.x = state.from.x + (MARK.x - state.from.x) * k;
       out.z = state.from.z + (MARK.z - state.from.z) * k;
       out.moving = t > 0 && t < 1;
-      out.phase = Math.hypot(out.x - state.from.x, out.z - state.from.z) / 2;
+      out.phase = Math.hypot(out.x - state.from.x, out.z - state.from.z) / stride;
       out.facing = out.moving ? facingTo2(state.from, MARK) : FACING_DESK;
       return true;
     }
@@ -1191,11 +1191,12 @@ header {
     return hit;
   }
   function blocked(scene, x, z) {
-    if (!Number.isFinite(x + z) || x < scene.bounds[0] + 0.18 || x > scene.bounds[1] - 0.18 || z < 0.15 || z > scene.length - 0.15)
+    const r = scene.bodyRadius ?? 0.18;
+    if (!Number.isFinite(x + z) || x < scene.bounds[0] + r || x > scene.bounds[1] - r || z < 0.15 || z > scene.length - 0.15)
       return true;
     if (scene.walkable && !pointInPolygon(x, z, scene.walkable)) return true;
     return scene.obstacles.some(
-      (o) => Math.abs(x - o.x) < o.w / 2 + 0.18 && Math.abs(z - o.z) < o.d / 2 + 0.18
+      (o) => Math.abs(x - o.x) < o.w / 2 + r && Math.abs(z - o.z) < o.d / 2 + r
     );
   }
   function lineClear(scene, a, b) {
@@ -1268,7 +1269,8 @@ header {
       length: 25,
       bounds: [-3, 3],
       spawn: { x: 1.1, z: 3 },
-      nearHeight: 0.18,
+      // Calibrated against painted references (bin, roller shutter); see tests/scale.mjs.
+      nearHeight: 0.234,
       walkable: [
         [-2.65, 0.3],
         [2.65, 0.3],
@@ -1309,7 +1311,8 @@ header {
       length: 28,
       bounds: [-6, 6],
       spawn: { x: -1.4, z: 5 },
-      nearHeight: 0.2,
+      // Calibrated against the studio doors at the top of the stairs.
+      nearHeight: 0.24,
       walkable: [
         [-5.65, 0.3],
         [5.65, 0.3],
@@ -1408,7 +1411,8 @@ header {
     length: 17,
     bounds: [-4, 4],
     spawn: { x: -1.7, z: 3.3 },
-    nearHeight: 0.22,
+    // Calibrated against the desk, office chair and filing cabinet.
+    nearHeight: 0.66,
     walkable: [
       [-3.7, 0.3],
       [3.7, 0.3],
@@ -1468,6 +1472,8 @@ header {
           [0.64, 0.572]
         ]
       );
+    s.bodyUnits = actorHeightUnits(s);
+    s.bodyRadius = 0.09 * s.bodyUnits;
   }
   function actorHeightUnits(scene) {
     const z = Math.min(8, scene.length / 2), d = project(scene.h, 0, z).d, a = project(scene.h, -0.5, z), b = project(scene.h, 0.5, z);
@@ -1555,7 +1561,7 @@ header {
       label: "Watch the studio monitor",
       x: VIEW.x,
       z: VIEW.z,
-      reach: 1.5,
+      reach: 2.6,
       stand: true,
       rect: [0.705, 0.345, 0.795, 0.47]
     },
@@ -1566,7 +1572,7 @@ header {
       label: "Step up to the microphone",
       x: MARK.x,
       z: MARK.z,
-      reach: 0.95,
+      reach: 1.6,
       rect: [0.6, 0.29, 0.69, 0.47]
     }
   ];
@@ -2835,7 +2841,7 @@ header {
       queuedAction = null;
     }
     player.running = !locked && (keys.has("ShiftLeft") || keys.has("ShiftRight"));
-    let speed = player.running ? 3.9 : 2.35, mx = locked ? 0 : (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) - (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0), my = locked ? 0 : (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) - (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0);
+    let speed = (player.running ? 1.48 : 0.89) * strideUnits[sceneIndex], mx = locked ? 0 : (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) - (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0), my = locked ? 0 : (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) - (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0);
     player.moving = false;
     if (queuedAction && !mx && !my) {
       let object = interactables.find((o) => o.id === queuedAction);
@@ -3101,7 +3107,7 @@ header {
     [0.719, 0.443]
   ];
   var FEED_BOX = { x: 0.716, y: 0.36, w: 0.065, h: 0.091 };
-  var FEED_VIEW = { u0: 0.53, v0: 0.4, u1: 0.83, v1: 0.82 };
+  var FEED_VIEW = { u0: 0.5, v0: 0.27, u1: 0.89, v1: 0.81 };
   function facingTo(a, b) {
     const s = scenes[2], p = screenPoint(s, a.x, a.z), q = screenPoint(s, b.x, b.z);
     return Math.atan2(q.u - p.u, -(q.v - p.v));
@@ -3145,7 +3151,7 @@ header {
     );
     drawTapeMark((u, v) => [x + (u - fv.u0) * W * sx, y + (v - fv.v0) * H * sy], 0.3);
     if (actor) {
-      feedFigure(prediction, player, feedActor, facingTo);
+      feedFigure(prediction, player, feedActor, facingTo, strideUnits[2]);
       const p = screenPoint(s, feedActor.x, feedActor.z), d = project(s.h, feedActor.x, feedActor.z).d;
       actor.draw(
         ctx,

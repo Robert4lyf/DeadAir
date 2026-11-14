@@ -66,7 +66,7 @@ With Node.js 22 or later:
 npm test
 ```
 
-Unit tests cover the state machines (`prediction`, `encounter`, `plaza`, `ending`), sprite anchoring metadata, navigation and perspective mapping. Progression tests boot `game.js` in a VM (see `tests/support/harness.mjs`) and drive the real game loop through the shelter, breaker and caught routes, both prediction outcomes, both endings, restart, pause and hidden-tab timing, backtracking through the plaza, and a touch-only playthrough. They do not replace visual and audio playtesting.
+Unit tests cover the state machines (`prediction`, `encounter`, `plaza`, `ending`), sprite anchoring metadata, navigation and perspective mapping, and the character's scale in each scene (`tests/scale.mjs` checks it against painted references such as the studio desk, an office chair, a filing cabinet, a street bin and the studio doors). Progression tests boot `game.js` in a VM (see `tests/support/harness.mjs`) and drive the real game loop through the shelter, breaker and caught routes, both prediction outcomes, both endings, restart, pause and hidden-tab timing, backtracking through the plaza, and a touch-only playthrough. They do not replace visual and audio playtesting.
 
 Formatting uses Prettier: `npm run format` rewrites files and `npm run format:check` verifies them. CI runs both the tests and the format check on every pull request.
 

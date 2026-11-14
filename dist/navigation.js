@@ -49,17 +49,18 @@ export function pointInPolygon(x, z, poly) {
   return hit;
 }
 export function blocked(scene, x, z) {
+  const r = scene.bodyRadius ?? 0.18; // clearance kept from walls and obstacles
   if (
     !Number.isFinite(x + z) ||
-    x < scene.bounds[0] + 0.18 ||
-    x > scene.bounds[1] - 0.18 ||
+    x < scene.bounds[0] + r ||
+    x > scene.bounds[1] - r ||
     z < 0.15 ||
     z > scene.length - 0.15
   )
     return true;
   if (scene.walkable && !pointInPolygon(x, z, scene.walkable)) return true;
   return scene.obstacles.some(
-    (o) => Math.abs(x - o.x) < o.w / 2 + 0.18 && Math.abs(z - o.z) < o.d / 2 + 0.18,
+    (o) => Math.abs(x - o.x) < o.w / 2 + r && Math.abs(z - o.z) < o.d / 2 + r,
   );
 }
 export function lineClear(scene, a, b) {
@@ -144,7 +145,8 @@ export const scenes = [
     length: 25,
     bounds: [-3, 3],
     spawn: { x: 1.1, z: 3 },
-    nearHeight: 0.18,
+    // Calibrated against painted references (bin, roller shutter); see tests/scale.mjs.
+    nearHeight: 0.234,
     walkable: [
       [-2.65, 0.3],
       [2.65, 0.3],
@@ -185,7 +187,8 @@ export const scenes = [
     length: 28,
     bounds: [-6, 6],
     spawn: { x: -1.4, z: 5 },
-    nearHeight: 0.2,
+    // Calibrated against the studio doors at the top of the stairs.
+    nearHeight: 0.24,
     walkable: [
       [-5.65, 0.3],
       [5.65, 0.3],
@@ -284,7 +287,8 @@ scenes.push({
   length: 17,
   bounds: [-4, 4],
   spawn: { x: -1.7, z: 3.3 },
-  nearHeight: 0.22,
+  // Calibrated against the desk, office chair and filing cabinet.
+  nearHeight: 0.66,
   walkable: [
     [-3.7, 0.3],
     [3.7, 0.3],
@@ -344,6 +348,10 @@ for (let s of scenes) {
         [0.64, 0.572],
       ],
     );
+  // Body height is the ruler for everything scale-dependent in a scene: walking speed, stride
+  // and the clearance kept from walls (about a shoulder's half-width).
+  s.bodyUnits = actorHeightUnits(s);
+  s.bodyRadius = 0.09 * s.bodyUnits;
 }
 // How tall the character is in world units on a scene's floor (its calibration differs per
 // camera). Used to match the walk cycle to ground speed so feet do not slide.
@@ -437,7 +445,7 @@ export const interactables = [
     label: 'Watch the studio monitor',
     x: VIEW.x,
     z: VIEW.z,
-    reach: 1.5,
+    reach: 2.6,
     stand: true,
     rect: [0.705, 0.345, 0.795, 0.47],
   },
@@ -448,7 +456,7 @@ export const interactables = [
     label: 'Step up to the microphone',
     x: MARK.x,
     z: MARK.z,
-    reach: 0.95,
+    reach: 1.6,
     rect: [0.6, 0.29, 0.69, 0.47],
   },
 ];

@@ -1097,7 +1097,9 @@ function update(dt) {
     queuedAction = null;
   }
   player.running = !locked && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
-  let speed = player.running ? 3.9 : 2.35,
+  // Pace in body heights per second (about 1.6 m/s walking, 2.6 m/s running), so every scene
+  // moves at the same believable speed whatever its world-unit scale.
+  let speed = (player.running ? 1.48 : 0.89) * strideUnits[sceneIndex],
     mx = locked
       ? 0
       : (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) -
@@ -1431,7 +1433,8 @@ const GLASS = [
     [0.719, 0.443],
   ],
   FEED_BOX = { x: 0.716, y: 0.36, w: 0.065, h: 0.091 },
-  FEED_VIEW = { u0: 0.53, v0: 0.4, u1: 0.83, v1: 0.82 }; // same 1.28 aspect as the glass
+  // The camera's framing: tall enough for a standing figure's head, same 1.28 aspect as the glass.
+  FEED_VIEW = { u0: 0.5, v0: 0.27, u1: 0.89, v1: 0.81 };
 function facingTo(a, b) {
   const s = scenes[2],
     p = screenPoint(s, a.x, a.z),
@@ -1491,7 +1494,7 @@ function drawMonitor() {
   );
   drawTapeMark((u, v) => [x + (u - fv.u0) * W * sx, y + (v - fv.v0) * H * sy], 0.3);
   if (actor) {
-    feedFigure(prediction, player, feedActor, facingTo);
+    feedFigure(prediction, player, feedActor, facingTo, strideUnits[2]);
     const p = screenPoint(s, feedActor.x, feedActor.z),
       d = project(s.h, feedActor.x, feedActor.z).d;
     actor.draw(

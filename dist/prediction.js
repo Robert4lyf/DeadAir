@@ -13,13 +13,15 @@ export const LEAD = 7; // the picture is seven seconds ahead of the room
 export const AFTERMATH = 3.2; // reaction plays out before the microphone can be taken
 export const RESIST_INSERT = 2.6; // resisted: the camera cuts back in to show the figure turning
 export const MARK = { x: 0.15, z: 15.9 }; // tape mark under the boom microphone
-export const MARK_RADIUS = 0.9;
-export const VIEW = { x: 2.05, z: 15.4 }; // where the player stands to watch the monitor
+export const MARK_RADIUS = 1.4; // about half a metre at the studio's scale
+// Where the player stands to watch the monitor: a step back from the desk, just left of the
+// screen so the standing figure does not hide it, and about 1.4 m from the tape mark.
+export const VIEW = { x: 1.3, z: 12 };
 
 // Within the preview, the figure starts walking after a beat and arrives before the cut back.
 const EPS = 1e-6; // gameplay time accumulates in floating point steps
-const WALK_START = 0.7,
-  WALK_END = PREVIEW - 1.1;
+const WALK_START = 1.2,
+  WALK_END = PREVIEW - 2; // the figure then stands at the microphone until the cut
 
 export function createPrediction() {
   return {
@@ -103,7 +105,8 @@ const ease = (t) => t * t * (3 - 2 * t);
 // Writes the figure shown on the monitor into `out` without touching the real player.
 // `facingTo(a, b)` converts a world-space step into the sprite facing used by the game.
 // Returns false when the feed should simply show the room live.
-export function feedFigure(state, player, out, facingTo) {
+// `stride` is the studio's walk-cycle length in world units, so the figure's legs match its pace.
+export function feedFigure(state, player, out, facingTo, stride = 5) {
   out.running = false;
   out.moving = false;
   if (state.phase === 'idle' || (state.phase === 'resolved' && state.outcome === 'followed')) {
@@ -122,7 +125,7 @@ export function feedFigure(state, player, out, facingTo) {
     out.x = state.from.x + (MARK.x - state.from.x) * k;
     out.z = state.from.z + (MARK.z - state.from.z) * k;
     out.moving = t > 0 && t < 1;
-    out.phase = Math.hypot(out.x - state.from.x, out.z - state.from.z) / 2;
+    out.phase = Math.hypot(out.x - state.from.x, out.z - state.from.z) / stride;
     out.facing = out.moving ? facingTo(state.from, MARK) : FACING_DESK;
     return true;
   }
