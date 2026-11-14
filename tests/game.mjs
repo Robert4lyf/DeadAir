@@ -31,16 +31,28 @@ for (let scene of scenes) {
   assert(!blocked(scene, scene.exit.x, scene.exit.z));
   assert(blocked(scene, -100, 10));
   assert(blocked(scene, 0, scene.length + 10));
-  assert(
-    project(scene.h, 0, 2).d < project(scene.h, 0, scene.length - 2).d,
-    'Actor shrinks with depth',
-  );
+  // Scenes that recede from the camera make the actor shrink with distance; the side-on
+  // street pans instead, with the walkway parallel to the picture.
+  if (scene.lateral === 'z')
+    assert(
+      screenPoint(scene, 0, scene.length - 1).u > 1 + screenPoint(scene, 0, 1).u * 0,
+      'The panorama street extends past one frame width',
+    );
+  else
+    assert(
+      project(scene.h, 0, 2).d < project(scene.h, 0, scene.length - 2).d,
+      'Actor shrinks with depth',
+    );
   console.log('PASS:', scene.name, 'perspective, navigation and exit');
 }
+// Walking along the wall from one side of the planter to the other needs a detour.
 const s = scenes[0],
-  around = route(s, { x: -1.5, z: 9 }, { x: -1.5, z: 15 });
+  planter = s.obstacles[0],
+  from = { x: 2.4, z: planter.z - planter.d / 2 - 0.8 },
+  to = { x: 2.4, z: planter.z + planter.d / 2 + 0.8 },
+  around = route(s, from, to);
 assert(around.length > 1, 'Click movement must find a detour around the planter');
-let p = { x: -1.5, z: 9 };
+let p = from;
 for (let next of around) {
   assert(lineClear(s, p, next));
   p = next;

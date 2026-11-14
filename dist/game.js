@@ -16,6 +16,8 @@ import {
   inShelter,
   recovering,
   RECOVERY,
+  SHELTER,
+  SHELTER_SPOT,
 } from './encounter.js';
 import { SpriteActor, turnToward } from './sprites.js';
 import {
@@ -150,6 +152,29 @@ function makePlayer(p, facing = 0) {
 }
 // One walk cycle (two steps) covers about one body height; a run cycle about 1.3.
 const strideUnits = scenes.map(actorHeightUnits);
+// Camera. Most scenes are one fixed shot; a scene with a wider panorama (the street) pans to
+// keep the player inside the middle of the frame. camU is the frame's left edge, in frame widths.
+let camU = 0;
+const sceneSpan = (i = sceneIndex) => scenes[i].span ?? 1,
+  clampCam = (u, i = sceneIndex) => Math.min(sceneSpan(i) - 1, Math.max(0, u));
+function snapCamera() {
+  camLead = 0;
+  camU = clampCam(screenPoint(scenes[sceneIndex], player.x, player.z).u - 0.5);
+}
+// The camera leads: it keeps the player toward the side they came from, so the street ahead
+// (and, once it is open, the crossing) is in view. `camLead` eases toward the travel direction.
+let camLead = 0.12;
+function updateCamera(dt) {
+  if (sceneSpan() <= 1) return void (camU = 0);
+  const s = scenes[sceneIndex],
+    u = screenPoint(s, player.x, player.z).u,
+    heading = player.moving ? Math.sign(Math.sin(player.facing)) : 0,
+    // Once the crossing opens, lean toward it as far as keeps the player comfortably in frame.
+    beckon = sceneIndex === 0 && crossingOpen(broadcast) && !heading,
+    goal = beckon ? 0.38 : heading * 0.14;
+  camLead += ((heading || beckon ? goal : camLead) - camLead) * Math.min(1, dt * 1.5);
+  camU += (clampCam(u - 0.5 + camLead) - camU) * Math.min(1, dt * 3);
+}
 function resize() {
   let r = frame.getBoundingClientRect(),
     scale = Math.min(devicePixelRatio || 1, 1.5);
@@ -404,6 +429,7 @@ function enter() {
   $('#title').hidden = true;
   $('#hud').hidden = false;
   $('#touch').hidden = !touch;
+  snapCamera();
   setChapter();
   say('Find the crossing at the end of the street. The studio is still on air.', 6, 1, {
     while: during.streetQuiet,
@@ -462,15 +488,12 @@ function changeScene(next) {
 function applyTransition() {
   sceneIndex = transitionTarget;
   advanceSubtitles(); // lines from the previous scene end with it
-  let spawn =
-    sceneIndex === 0
-      ? { x: 0, z: 22.1 }
-      : sceneIndex === 1 && transitionFrom === 2
-        ? { x: 0, z: 24 }
-        : scenes[sceneIndex].spawn;
+  const scene = scenes[sceneIndex],
+    spawn = transitionFrom > sceneIndex ? scene.returnSpawn : scene.spawn;
   let p = screenPoint(scenes[sceneIndex], spawn.x, spawn.z),
     q = screenPoint(scenes[sceneIndex], spawn.x, spawn.z + (transitionFrom > sceneIndex ? -1 : 1));
   player = makePlayer(spawn, Math.atan2(q.u - p.u, -(q.v - p.v)));
+  snapCamera();
   arrivalGuard =
     sceneIndex === 0
       ? 'crossing'
@@ -832,7 +855,7 @@ addEventListener('focus', wake);
 document.addEventListener('visibilitychange', () => (document.hidden ? suspend() : wake()));
 function pointer(e) {
   let r = canvas.getBoundingClientRect();
-  return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height };
+  return { u: (e.clientX - r.left) / r.width + camU, v: (e.clientY - r.top) / r.height };
 }
 // Small world objects get a forgiving hit area (in CSS pixels); the nearest object wins, so
 // padded areas never make a tap ambiguous.
@@ -892,12 +915,37 @@ canvas.addEventListener('pointerdown', (e) => {
   queuedAction = o?.id ?? null;
   marker = { u, v, t: time, bad: false };
 });
+// Held movement into an obstacle sidesteps toward its nearer clear edge instead of stopping,
+// so walking along the street flows around the planter or the lamp post.
+function slideAround(s, dx, dz) {
+  const step = Math.hypot(dx, dz);
+  if (!step) return;
+  const fx = dx / step,
+    fz = dz / step;
+  let best = null;
+  for (const side of [1, -1]) {
+    const px = -fz * side,
+      pz = fx * side;
+    for (let t = 0.1; t <= 4; t += 0.1) {
+      if (blocked(s, player.x + px * t, player.z + pz * t)) break; // that side is walled off
+      if (!blocked(s, player.x + px * t + fx * 0.3, player.z + pz * t + fz * 0.3)) {
+        if (!best || t < best.t) best = { t, px, pz };
+        break;
+      }
+    }
+  }
+  if (best) {
+    player.x += best.px * step;
+    player.z += best.pz * step;
+  }
+}
 function move(dx, dz, dt) {
   const old = screenPoint(scenes[sceneIndex], player.x, player.z),
     start = { x: player.x, z: player.z },
     s = scenes[sceneIndex];
   if (!blocked(s, player.x + dx, player.z)) player.x += dx;
   if (!blocked(s, player.x, player.z + dz)) player.z += dz;
+  if (player.x === start.x && player.z === start.z) slideAround(s, dx, dz);
   const p = screenPoint(s, player.x, player.z),
     distance = Math.hypot(player.x - start.x, player.z - start.z);
   player.moving = distance > 0.0001;
@@ -920,7 +968,7 @@ function move(dx, dz, dt) {
 function encounterEvent(event) {
   if (event === 'warning') {
     say(
-      'The lamps begin to hum. Shelter beneath the right-hand awning, or cut the service feed ahead.',
+      'The lamps begin to hum. Shelter beneath the shop awning, or cut the service feed ahead.',
       7,
       4,
       { while: during.warning },
@@ -935,8 +983,8 @@ function encounterEvent(event) {
     note(54, 0.8, 0.12, 'sawtooth');
   } else if (event === 'caught') {
     // The picture skips: input is held while the frame rolls, and the player lands in shelter.
-    player.x = 1.4;
-    player.z = 13.3;
+    player.x = SHELTER_SPOT.x;
+    player.z = SHELTER_SPOT.z;
     player.moving = false;
     keys.clear();
     path = [];
@@ -1097,7 +1145,9 @@ function update(dt) {
     queuedAction = null;
   }
   player.running = !locked && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
-  let speed = player.running ? 3.9 : 2.35,
+  // Pace in body heights per second (about 1.6 m/s walking, 2.6 m/s running), so every scene
+  // moves at the same believable speed whatever its world-unit scale.
+  let speed = (player.running ? 1.48 : 0.89) * strideUnits[sceneIndex],
     mx = locked
       ? 0
       : (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) -
@@ -1155,6 +1205,7 @@ function update(dt) {
     } else move((dx / d) * Math.min(d, speed * dt), (dz / d) * Math.min(d, speed * dt), dt);
   } else player.facing = turnToward(player.facing, player.desiredFacing, dt);
   player.stillFor = player.moving ? 0 : player.stillFor + dt;
+  updateCamera(dt);
   for (let event of updateBroadcast(broadcast, dt, player, sceneIndex)) encounterEvent(event);
   for (const event of updatePrediction(prediction, dt, player, sceneIndex === 2))
     predictionEvent(event);
@@ -1196,7 +1247,7 @@ function update(dt) {
         ? 'CUT THE FEED: BREAKER AT THE END OF THIS AWNING'
         : inShelter(player)
           ? 'IN SHADOW / STAY HERE'
-          : 'RIGHT-HAND AWNING OR SERVICE BREAKER',
+          : 'SHOP AWNING OR SERVICE BREAKER',
     );
   }
   updateObjective();
@@ -1240,15 +1291,16 @@ function lightingTone(s, p) {
         ? 'warm'
         : 'neutral';
   if (inShelter(player)) return 'shadow';
-  if (player.z < 8) return 'warm';
-  return player.z > 19 ? 'cool' : 'neutral';
+  if (player.z < 3 || Math.abs(player.z - STREET.lampZ) < 3) return 'warm';
+  return player.z > 24 ? 'ember' : 'neutral';
 }
 // Standing height in canvas pixels: the scene's calibrated body height times the local
 // sideways scale. On flat floors this equals the depth-based size; on the plaza stairs, which
 // use their own projection, it keeps the figure in proportion to the doors.
 function actorHeightPx(s, index, x, z) {
-  const a = screenPoint(s, x - 0.5, z),
-    b = screenPoint(s, x + 0.5, z);
+  const along = s.lateral === 'z', // the axis parallel to the picture plane
+    a = screenPoint(s, along ? x : x - 0.5, along ? z - 0.5 : z),
+    b = screenPoint(s, along ? x : x + 0.5, along ? z + 0.5 : z);
   return strideUnits[index] * Math.hypot((b.u - a.u) * W, (b.v - a.v) * H);
 }
 function drawActor() {
@@ -1303,122 +1355,95 @@ function drawActor() {
     ctx.save();
     polygon(mask.polygon);
     ctx.clip();
-    ctx.drawImage(assets[s.id], 0, 0, W, H);
+    ctx.drawImage(assets[s.id], 0, 0, sceneSpan() * W, H);
     ctx.restore();
   }
 }
-function panel(u, v, w, h, { breaker = false } = {}) {
-  let x = u * W,
-    y = v * H,
-    bw = w * W,
-    bh = h * H;
-  ctx.fillStyle = '#101415';
-  ctx.fillRect(x + 2, y + 2, bw, bh);
-  ctx.fillStyle = breaker ? '#494136' : '#3b423f';
-  ctx.fillRect(x, y, bw, bh);
-  ctx.strokeStyle = '#73756c';
-  ctx.lineWidth = Math.max(1, W / 1600);
-  ctx.strokeRect(x, y, bw, bh);
-  ctx.fillStyle = '#898779';
-  for (let sx of [0.1, 0.88])
-    for (let sy of [0.08, 0.9])
-      ctx.fillRect(x + bw * sx, y + bh * sy, Math.max(0.6, bw * 0.025), Math.max(0.6, bh * 0.025));
-  ctx.fillStyle = '#0a1110';
-  ctx.fillRect(x + bw * 0.12, y + bh * 0.16, bw * 0.76, bh * 0.43);
-  if (breaker) {
-    ctx.fillStyle = facts.breaker ? '#5c9d81' : '#b9915b';
-    ctx.fillRect(x + bw * 0.32, y + bh * 0.27, bw * 0.36, bh * 0.17);
-    ctx.fillStyle = '#b9b3a0';
-    ctx.fillRect(x + bw * 0.41, y + bh * (facts.breaker ? 0.68 : 0.55), bw * 0.18, bh * 0.19);
-  } else {
-    ctx.fillStyle = '#78978b';
-    for (let i = 0; i < 7; i++)
-      ctx.fillRect(
-        x + bw * 0.18,
-        y + bh * (0.24 + i * 0.035),
-        bw * (0.3 + Math.sin(time * 13 + i) * 0.13),
-        Math.max(1, bh * 0.012),
-      );
-    ctx.fillStyle = '#aba79a';
-    ctx.fillRect(x + bw * 0.2, y + bh * 0.72, bw * 0.2, bh * 0.07);
-    ctx.fillRect(x + bw * 0.61, y + bh * 0.72, bw * 0.2, bh * 0.07);
-  }
-}
+// Street features painted into the panorama, in panorama frame coordinates (frame widths).
+const STREET = {
+  lamp: [0.6537, 0.2352],
+  lampPool: [0.63, 0.86],
+  lampZ: 11.23,
+  signalMan: [1.3874, 0.4844],
+  signalTop: [1.3868, 0.3301],
+  breaker: [1.0692, 0.5078, 1.111, 0.6191],
+  breakerLight: [1.079, 0.524],
+  drain: [1.1824, 0.8027],
+  sign: [1.4506, 0.087],
+};
 function drawStreetProps() {
-  panel(0.698, 0.67, 0.022, 0.038);
-  panel(0.657, 0.604, 0.02, 0.034, { breaker: true });
-  let gateOpen = crossingOpen(broadcast);
-  ctx.fillStyle = gateOpen ? '#99c3a6' : '#bb6552';
-  ctx.fillRect(0.603 * W, 0.575 * H, 0.004 * W, 0.008 * H);
-  ctx.fillStyle = '#17211e';
-  ctx.fillRect(0.604 * W, 0.582 * H, 0.0014 * W, 0.045 * H);
-  if (!gateOpen) {
-    ctx.strokeStyle = '#5b655d';
-    ctx.lineWidth = Math.max(1, W * 0.001);
-    ctx.beginPath();
-    ctx.moveTo(0.582 * W, 0.623 * H);
-    ctx.lineTo(0.643 * W, 0.623 * H);
-    ctx.stroke();
+  const open = crossingOpen(broadcast);
+  ctx.save();
+  if (open) {
+    // The painted pedestrian signal shows red; when the crossing opens it changes to green.
+    ctx.globalCompositeOperation = 'multiply';
+    softLight(...STREET.signalMan, 0.03, '20,30,26', 0.92);
+    softLight(...STREET.signalTop, 0.02, '20,30,26', 0.92);
+    ctx.globalCompositeOperation = 'screen';
+    softLight(...STREET.signalMan, 0.026, '90,230,140', 0.8);
+    softLight(...STREET.signalTop, 0.016, '90,230,140', 0.75);
+  } else if (!reduced) {
+    ctx.globalCompositeOperation = 'screen';
+    softLight(
+      ...STREET.signalMan,
+      0.03,
+      '255,50,40',
+      0.12 + Math.max(0, Math.sin(time * 3)) * 0.14,
+    );
   }
+  ctx.restore();
   // The street lamp records how the broadcast ended: red if it caught the player (for the
   // rest of the game), dark if the feed was cut, humming while the transmission runs.
+  const [lu, lv] = STREET.lamp;
   if (broadcast.caught) {
     // Multiply first so the near-white lamp actually turns red, then let it glow.
     ctx.save();
     ctx.globalCompositeOperation = 'multiply';
-    softLight(0.402, 0.392, 0.05, '255,52,40', 1);
+    softLight(lu, lv, 0.05, '255,52,40', 1);
     ctx.globalCompositeOperation = 'screen';
-    softLight(0.402, 0.392, 0.028, '255,40,24', reduced ? 0.55 : 0.45 + Math.sin(time * 1.3) * 0.1);
-    softLight(0.4, 0.46, 0.13, '200,40,24', 0.09);
+    softLight(lu, lv, 0.028, '255,40,24', reduced ? 0.55 : 0.45 + Math.sin(time * 1.3) * 0.1);
+    softLight(...STREET.lampPool, 0.16, '200,40,24', 0.1);
     ctx.restore();
   } else if (broadcast.resolution === 'cut') {
     ctx.save();
     ctx.globalCompositeOperation = 'multiply';
-    softLight(0.402, 0.392, 0.055, '22,25,30', 0.92);
-    softLight(0.4, 0.46, 0.12, '60,64,72', 0.5);
+    softLight(lu, lv, 0.055, '22,25,30', 0.92);
+    softLight(...STREET.lampPool, 0.18, '60,64,72', 0.55);
     ctx.restore();
   }
   if (['warning', 'live'].includes(broadcast.phase) && !reduced) {
     ctx.save();
     ctx.globalCompositeOperation = 'screen';
-    let amount = 0.05 + Math.max(0, Math.sin(time * 5)) * 0.07;
-    softLight(0.404, 0.449, 0.08, '225,156,83', amount);
+    softLight(lu, lv + 0.03, 0.08, '225,156,83', 0.05 + Math.max(0, Math.sin(time * 5)) * 0.07);
     ctx.restore();
   }
+  // Breaker: a status light, amber while the feed is live and green once it is cut.
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  softLight(...STREET.breakerLight, 0.008, facts.breaker ? '90,230,140' : '240,170,70', 0.9);
+  ctx.restore();
   if (broadcast.holding && !recovering(broadcast)) {
-    // Point at the way out: the breaker panel pulses at the far end of the awning.
+    // Point at the way out: the breaker pulses at the far end of the awning.
+    const [x0, y0, x1, y1] = STREET.breaker;
     ctx.save();
     ctx.strokeStyle = `rgba(230,180,110,${reduced ? 0.8 : 0.45 + Math.sin(time * 4) * 0.35})`;
     ctx.lineWidth = Math.max(1.5, W / 800);
-    ctx.strokeRect(0.651 * W, 0.598 * H, 0.032 * W, 0.046 * H);
-    ctx.restore();
-  }
-  if (facts.breaker) {
-    ctx.save();
-    ctx.globalAlpha = 0.13;
-    ctx.fillStyle = '#081018';
-    polygon([
-      [0.63, 0.6],
-      [0.7, 0.6],
-      [0.72, 0.77],
-      [0.62, 0.77],
-    ]);
-    ctx.fill();
+    ctx.strokeRect(x0 * W - 3, y0 * H - 3, (x1 - x0) * W + 6, (y1 - y0) * H + 6);
     ctx.restore();
   }
   if (['warning', 'live'].includes(broadcast.phase)) {
-    let a = screenPoint(scenes[0], 0.65, 11.1),
-      b = screenPoint(scenes[0], 2.35, 11.1),
-      c = screenPoint(scenes[0], 2.35, 16.1),
-      d = screenPoint(scenes[0], 0.65, 16.1);
+    const corners = [
+      [SHELTER.x0, SHELTER.z0],
+      [SHELTER.x1, SHELTER.z0],
+      [SHELTER.x1, SHELTER.z1],
+      [SHELTER.x0, SHELTER.z1],
+    ].map(([x, z]) => {
+      const q = screenPoint(scenes[0], x, z);
+      return [q.u, q.v];
+    });
     ctx.strokeStyle = inShelter(player) ? '#a8c2b366' : '#d5c09355';
     ctx.lineWidth = 1;
-    polygon([
-      [a.u, a.v],
-      [b.u, b.v],
-      [c.u, c.v],
-      [d.u, d.v],
-    ]);
+    polygon(corners);
     ctx.stroke();
   }
 }
@@ -1431,7 +1456,8 @@ const GLASS = [
     [0.719, 0.443],
   ],
   FEED_BOX = { x: 0.716, y: 0.36, w: 0.065, h: 0.091 },
-  FEED_VIEW = { u0: 0.53, v0: 0.4, u1: 0.83, v1: 0.82 }; // same 1.28 aspect as the glass
+  // The camera's framing: tall enough for a standing figure's head, same 1.28 aspect as the glass.
+  FEED_VIEW = { u0: 0.5, v0: 0.27, u1: 0.89, v1: 0.81 };
 function facingTo(a, b) {
   const s = scenes[2],
     p = screenPoint(s, a.x, a.z),
@@ -1491,7 +1517,7 @@ function drawMonitor() {
   );
   drawTapeMark((u, v) => [x + (u - fv.u0) * W * sx, y + (v - fv.v0) * H * sy], 0.3);
   if (actor) {
-    feedFigure(prediction, player, feedActor, facingTo);
+    feedFigure(prediction, player, feedActor, facingTo, strideUnits[2]);
     const p = screenPoint(s, feedActor.x, feedActor.z),
       d = project(s.h, feedActor.x, feedActor.z).d;
     actor.draw(
@@ -1659,9 +1685,8 @@ function environment() {
     ctx.save();
     ctx.globalCompositeOperation = 'screen';
     softLight(
-      0.589,
-      0.148,
-      0.034,
+      ...STREET.sign,
+      0.05,
       '170,39,24',
       reduced ? 0.025 : 0.02 + (Math.sin(time * 0.8) > 0.8 ? 0.04 : 0),
     );
@@ -1675,8 +1700,8 @@ function environment() {
     for (let i = 0; i < 3; i++) {
       let phase = (time * 0.18 + i * 0.33) % 1;
       softLight(
-        0.699 + Math.sin(time * 0.3 + i) * 0.006,
-        0.716 - phase * 0.075,
+        STREET.drain[0] + Math.sin(time * 0.3 + i) * 0.006,
+        STREET.drain[1] - phase * 0.075,
         0.018 + phase * 0.035,
         '171,187,186',
         0.028 * (1 - phase),
@@ -1714,10 +1739,10 @@ function weather(level = 1) {
 // Outline of the tower's ON AIR sign as painted in the street and plaza backgrounds.
 const TOWER_SIGN = [
   [
-    [0.585, 0.131],
-    [0.645, 0.131],
-    [0.645, 0.165],
-    [0.585, 0.165],
+    [1.4044, 0.0645],
+    [1.4967, 0.0645],
+    [1.4967, 0.1094],
+    [1.4044, 0.1094],
   ],
   [
     [0.489, 0.08],
@@ -1726,7 +1751,9 @@ const TOWER_SIGN = [
     [0.49, 0.12],
   ],
 ];
-const STREET_LAMP = [0.402, 0.392];
+const STREET_LAMP = STREET.lamp,
+  // The street's final shot frames the lamp and the tower sign together.
+  ENDING_STREET_CAM = (STREET.lamp[0] + STREET.sign[0]) / 2 - 0.5;
 function drawEnding() {
   const e = ending,
     k = Math.min(1, e.clock / 2.2),
@@ -1735,7 +1762,9 @@ function drawEnding() {
     su = (sign[0][0] + sign[2][0]) / 2,
     sv = (sign[0][1] + sign[2][1]) / 2,
     sr = (sign[2][1] - sign[0][1]) * 1.4;
-  ctx.drawImage(assets[scenes[index].id], 0, 0, W, H);
+  ctx.save();
+  if (index === 0) ctx.translate(-clampCam(ENDING_STREET_CAM, 0) * W, 0);
+  ctx.drawImage(assets[scenes[index].id], 0, 0, sceneSpan(index) * W, H);
   if (index === 1) drawPlaza();
   ctx.save();
   if (e.tower === 'blazing') {
@@ -1778,6 +1807,7 @@ function drawEnding() {
     }
     ctx.restore();
   }
+  ctx.restore(); // end of the camera-framed shot; rain and letterbox are screen-space
   weather(e.rain === 'heavier' ? 1 + k * 0.8 : Math.max(0, 1 - e.clock / 2.5));
   ctx.fillStyle = '#020304';
   ctx.fillRect(0, 0, W, H * 0.04);
@@ -1854,10 +1884,13 @@ function render(now) {
     if (mode === 'ending' || (mode === 'end' && ending)) drawEnding();
     else if (insert) drawInsertShot();
     else {
-      ctx.drawImage(assets[s.id], 0, 0, W, H);
+      ctx.save();
+      ctx.translate(-camU * W, 0);
+      ctx.drawImage(assets[s.id], 0, 0, sceneSpan() * W, H);
       environment();
       if (mode !== 'title') drawActor();
       drawMarker();
+      ctx.restore();
       if (sceneIndex !== 2) weather();
     }
     drawPictureSkip();

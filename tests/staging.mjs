@@ -10,7 +10,10 @@ const monitorRect = interactables.find((o) => o.id === 'monitor').rect,
   centre = (r) => [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
 
 test('the viewing point is clearly outside the tape mark', () => {
-  assert(Math.hypot(VIEW.x - MARK.x, VIEW.z - MARK.z) > MARK_RADIUS * 1.8);
+  const apart = Math.hypot(VIEW.x - MARK.x, VIEW.z - MARK.z),
+    monitor = interactables.find((o) => o.id === 'monitor');
+  assert(apart > MARK_RADIUS * 2.5);
+  assert(monitor.reach + MARK_RADIUS < apart, 'Nowhere can the monitor be used from on the mark');
 });
 
 test('using the monitor from inside the tape mark walks to the viewing point first', async () => {
@@ -19,7 +22,10 @@ test('using the monitor from inside the tape mark walks to the viewing point fir
 goToScene(2);
 walkTo(0.8, 15.9);
 assert(atMark(player), 'Setup: standing on the tape mark');
-assert(interact('monitor'));
+assert.equal(interact('monitor'), false, 'Out of reach from the mark by keyboard');
+`);
+  g.tap(...centre(monitorRect)); // click or tap the monitor from the mark
+  g.run(`
 assert.equal(prediction.phase, 'idle', 'Nothing starts before the approach');
 assert(path.length, 'The player is routed to the viewing point');
 until(() => prediction.phase === 'preview');
@@ -34,7 +40,7 @@ test('keyboard use near the monitor also approaches before starting', async () =
   const g = await bootGame();
   g.run(`
 goToScene(2);
-walkTo(1.4, 15.6);
+walkTo(2.0, 13.5);
 update(1 / 60);
 assert.equal(interaction.id, 'monitor');
 interact();

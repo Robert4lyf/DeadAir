@@ -38,7 +38,7 @@ Headphones are recommended; sound can be toggled in the interface, and every aud
 
 Three fixed-camera scenes. A direct run takes about a minute of game time; a first play that reads everything, explores and lingers on the studio sequence takes longer (not yet timed with real players).
 
-1. **The side street.** A broadcast warns before it goes live. Shelter under the right-hand awning to wait it out, or cut the service feed at the breaker. If the tower catches you in the open, the picture skips, you land back under the awning, and the transmission _holds_ on you: it will not pass by itself until you cut the feed. The street lamp that caught you stays red for the rest of the game.
+1. **The side street.** A side-on panorama the camera pans along as you walk from the stairwell to the crossing. A broadcast warns before it goes live. Shelter under the shop awning to wait it out, or cut the service feed at the breaker. If the tower catches you in the open, the picture skips, you land back under the awning, and the transmission _holds_ on you: it will not pass by itself until you cut the feed. The street lamp that caught you stays red for the rest of the game.
 2. **The broadcast plaza.** Partway across, a horn speaker announces a guest; the studio doors then open on their own while you are still far away, and the PA greets you in a way that depends on how the street went.
 3. **Studio 001.** The monitor is a live feed of the room. Watching it always starts from its viewing point beside the desk (you walk there first if needed); the picture then jumps seven seconds ahead and you see yourself walk to a tape mark under the microphone. You then have seven seconds. Stand on the mark to **follow** the prediction, or stay away to **resist** it. Either way, take the microphone and choose to **speak** or **stay silent**.
 
@@ -66,7 +66,7 @@ With Node.js 22 or later:
 npm test
 ```
 
-Unit tests cover the state machines (`prediction`, `encounter`, `plaza`, `ending`), sprite anchoring metadata, navigation and perspective mapping. Progression tests boot `game.js` in a VM (see `tests/support/harness.mjs`) and drive the real game loop through the shelter, breaker and caught routes, both prediction outcomes, both endings, restart, pause and hidden-tab timing, backtracking through the plaza, and a touch-only playthrough. They do not replace visual and audio playtesting.
+Unit tests cover the state machines (`prediction`, `encounter`, `plaza`, `ending`), sprite anchoring metadata, navigation and perspective mapping, and the character's scale in each scene (`tests/scale.mjs` checks it against painted references such as the studio desk, an office chair, a filing cabinet, the street's stairwell doorway and lamp post, and the studio doors). Progression tests boot `game.js` in a VM (see `tests/support/harness.mjs`) and drive the real game loop through the shelter, breaker and caught routes, both prediction outcomes, both endings, restart, pause and hidden-tab timing, backtracking through the plaza, and a touch-only playthrough. They do not replace visual and audio playtesting.
 
 Formatting uses Prettier: `npm run format` rewrites files and `npm run format:check` verifies them. CI runs both the tests and the format check on every pull request.
 

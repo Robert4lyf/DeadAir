@@ -16,10 +16,16 @@ const ground = (scene, x, z) => {
 test('a touch-only player can finish the game, including every new interaction', async () => {
   const g = await bootGame();
   const until = (code) => g.run(`until(() => ${code})`);
-  // Street: shelter under the awning by tapping the ground, then tap the crossing.
-  g.tap(...ground(0, 1.4, 13.4));
+  // Street: the camera pans as the player walks. Tap ahead along the street, shelter under the
+  // awning, then tap the crossing once it is in view.
+  g.tap(...ground(0, 1.0, 9.5));
+  until('!path.length');
+  g.tap(...ground(0, 1.8, 15));
   until("broadcast.phase === 'clear'");
-  g.tap(...centre('crossing'));
+  g.run('step(2)'); // the camera leads toward the opened crossing
+  const [cu, cv] = centre('crossing');
+  assert(cu - g.run('camU') < 0.97, 'The crossing is on screen once it opens');
+  g.tap(cu, cv);
   until('sceneIndex === 1 && mode === "play"');
   // Plaza: tap toward the doors; the beat plays; tap the doors once open.
   g.tap(...ground(1, 0, 18));
@@ -41,7 +47,7 @@ test('a touch-only player can finish the game, including every new interaction',
 
 test('the on-screen prompt uses whatever is nearby', async () => {
   const g = await bootGame();
-  g.run(`walkTo(2.0, 5.2); update(1 / 60); assert.equal(interaction.id, 'notice');`);
+  g.run(`walkTo(2.4, 4.6); update(1 / 60); assert.equal(interaction.id, 'notice');`);
   g.click('#interaction');
   assert.equal(g.run('facts.notice'), true);
 });
