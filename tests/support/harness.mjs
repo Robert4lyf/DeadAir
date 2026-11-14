@@ -157,15 +157,19 @@ export async function bootGame() {
   });
   const run = (code) => vm.runInContext(code, sandbox, { timeout: 20000 });
   run('ready = true; enter();');
-  const el = (s) => document.querySelector(s);
+  const el = (s) => document.querySelector(s),
+    tapScreen = (u, v) =>
+      el('#scene').listeners.pointerdown?.forEach((fn) =>
+        fn({ clientX: u * 1280, clientY: v * 720, pointerType: 'touch' }),
+      );
   return {
     run,
     document,
-    // A finger tap on the picture at frame coordinates (u, v).
-    tap: (u, v) =>
-      el('#scene').listeners.pointerdown?.forEach((fn) =>
-        fn({ clientX: u * 1280, clientY: v * 720, pointerType: 'touch' }),
-      ),
+    // A finger tap on the scene at scene coordinates (u, v): converted to the screen through
+    // the current camera, so it lands where that point is actually drawn.
+    tap: (u, v) => tapScreen(u - vm.runInContext('camU', sandbox), v),
+    // A finger tap at a position on the visible frame (0-1 across the screen).
+    tapScreen,
     click: (s) => el(s).onclick?.(),
     // Leaving and returning to the page, as the browser reports it.
     hide() {

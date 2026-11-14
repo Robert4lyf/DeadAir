@@ -1,6 +1,6 @@
 // The side-street broadcast: a finite, readable encounter on the gameplay clock.
 //
-// dormant ──player passes z 13.2──▶ warning ──WARNING s──▶ live ──LIVE s in shelter──▶ clear
+// dormant ──player passes TRIGGER_Z─▶ warning ──WARNING s──▶ live ──LIVE s in shelter──▶ clear
 //                                                           │       (resolution: sheltered)
 //                                       exposed > EXPOSURE s│
 //                                                           ▼
@@ -35,8 +35,17 @@ export function createBroadcast() {
   };
 }
 
+// The shop awning on the street: it shelters the back of the pavement along its length.
+export const SHELTER = { x0: 0.6, x1: 2.75, z0: 12.6, z1: 19.1 },
+  SHELTER_SPOT = { x: 1.8, z: 14.2 }, // where a picture skip lands the player
+  TRIGGER_Z = 13; // passing the street lamp into the awning's reach starts the warning
 export function inShelter(player) {
-  return player.x >= 0.65 && player.x <= 2.35 && player.z >= 11.1 && player.z <= 16.1;
+  return (
+    player.x >= SHELTER.x0 &&
+    player.x <= SHELTER.x1 &&
+    player.z >= SHELTER.z0 &&
+    player.z <= SHELTER.z1
+  );
 }
 
 export function recovering(state) {
@@ -56,7 +65,7 @@ export function updateBroadcast(state, dt, player, scene) {
   }
   state.inside = inShelter(player);
   if (state.phase === 'dormant') {
-    if (player.z >= 13.2) {
+    if (player.z >= TRIGGER_Z) {
       state.phase = 'warning';
       state.remaining = WARNING;
       state.warned = true;

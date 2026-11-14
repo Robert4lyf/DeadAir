@@ -138,45 +138,37 @@ const corners = (w, l) => [
 ];
 export const scenes = [
   {
+    // A side-on panorama (dist/art/street.webp, 2884×1024) the camera pans across. The street
+    // runs left to right: z is distance along it (0.7 m per unit), x is depth across the
+    // pavement from the kerb (x -3) to the back wall (x 3). Positions are measured from the art.
     id: 'street',
     name: 'The side street',
     district: 'LOW CITY',
     file: 'street.webp',
-    length: 25,
+    span: 1.5846, // panorama width in frame widths
+    lateral: 'z', // the axis parallel to the picture plane
+    length: 28.8,
     bounds: [-3, 3],
-    spawn: { x: 1.1, z: 3 },
-    // Calibrated against painted references (bin, roller shutter); see tests/scale.mjs.
-    nearHeight: 0.234,
+    spawn: { x: 2.0, z: 1.6 }, // out of the stairwell doorway
+    returnSpawn: { x: 0.5, z: 25 }, // back from the plaza, by the crossing
+    bodyHeight: 2.5, // 1.75 m: doorway 2.1 m = 300 px, lamp post ~4.9 m = 694 px
     walkable: [
-      [-2.65, 0.3],
-      [2.65, 0.3],
-      [2.5, 8],
-      [2.25, 16],
-      [1.9, 20],
-      [1.45, 24.7],
-      [-1.45, 24.7],
-      [-1.7, 20],
-      [-1.9, 15],
-      [-2.3, 10],
+      [-2.75, 0.3],
+      [2.75, 0.3],
+      [2.75, 28.5],
+      [-2.75, 28.5],
     ],
-    obstacles: [{ x: -1.5, z: 12.1, w: 1, d: 1.6 }],
+    obstacles: [
+      { x: 1.67, z: 7.2, w: 2.67, d: 3.08 }, // planter against the wall
+      { x: -2.85, z: 11.23, w: 0.5, d: 0.5 }, // street lamp at the kerb
+    ],
     floor: [
-      [0.52, 1.03],
-      [0.82, 1.03],
-      [0.66, 0.6],
-      [0.55, 0.6],
+      [0, 0.8789],
+      [0, 0.7422],
+      [1.5824, 0.7422],
+      [1.5824, 0.8789],
     ],
-    occlusion: [
-      [
-        [0, 0],
-        [0.275, 0],
-        [0.275, 0.565],
-        [0.289, 0.574],
-        [0.555, 1],
-        [0, 1],
-      ],
-    ],
-    exit: { x: 0, z: 23.4 },
+    exit: { x: 0.5, z: 26.8 },
     exitLabel: 'Continue toward the tower',
   },
   {
@@ -187,6 +179,7 @@ export const scenes = [
     length: 28,
     bounds: [-6, 6],
     spawn: { x: -1.4, z: 5 },
+    returnSpawn: { x: 0, z: 24 }, // back from the studio, at the foot of the doors
     // Calibrated against the studio doors at the top of the stairs.
     nearHeight: 0.24,
     walkable: [
@@ -222,46 +215,18 @@ export const scenes = [
     exitLabel: 'Enter Studio 001',
   },
 ];
+// The street lamp stands at the kerb, nearer the camera than anywhere the player can walk.
 scenes[0].masks = [
   {
+    // The pole only: the character never reaches the lamp head, whose light effects must
+    // stay visible on top.
     polygon: [
-      [0, 0.55],
-      [0.277, 0.55],
-      [0.545, 1],
-      [0, 1],
+      [0.6055, 0.27],
+      [0.6286, 0.27],
+      [0.6286, 0.8887],
+      [0.6055, 0.8887],
     ],
-    depth: 1.1,
-  },
-  {
-    polygon: [
-      [0.274, 0.563],
-      [0.29, 0.574],
-      [0.557, 1],
-      [0.531, 1],
-    ],
-    depth: 1.1,
-  },
-  {
-    polygon: [
-      [0.423, 0.728],
-      [0.458, 0.69],
-      [0.515, 0.717],
-      [0.527, 0.789],
-      [0.487, 0.832],
-      [0.441, 0.813],
-    ],
-    depth: 0.835,
-  },
-  {
-    polygon: [
-      [0.554, 0.674],
-      [0.573, 0.647],
-      [0.612, 0.66],
-      [0.62, 0.704],
-      [0.6, 0.739],
-      [0.56, 0.726],
-    ],
-    depth: 0.74,
+    depth: 0.8789,
   },
 ];
 scenes[1].masks = [
@@ -287,6 +252,7 @@ scenes.push({
   length: 17,
   bounds: [-4, 4],
   spawn: { x: -1.7, z: 3.3 },
+  returnSpawn: { x: -1.7, z: 3.3 },
   // Calibrated against the desk, office chair and filing cabinet.
   nearHeight: 0.66,
   walkable: [
@@ -356,6 +322,7 @@ for (let s of scenes) {
 // How tall the character is in world units on a scene's floor (its calibration differs per
 // camera). Used to match the walk cycle to ground speed so feet do not slide.
 export function actorHeightUnits(scene) {
+  if (scene.bodyHeight) return scene.bodyHeight;
   const z = Math.min(8, scene.length / 2),
     d = project(scene.h, 0, z).d,
     a = project(scene.h, -0.5, z),
@@ -378,37 +345,37 @@ export const interactables = [
     id: 'notice',
     scene: 0,
     label: 'Read the curfew notice',
-    x: 2.0,
-    z: 4.0,
-    reach: 1.6,
-    rect: [0.825, 0.66, 0.89, 0.82],
+    x: 2.4,
+    z: 4.4,
+    reach: 1.7,
+    rect: [0.1846, 0.4883, 0.3, 0.6348],
   },
   {
     id: 'intercom',
     scene: 0,
     label: 'Listen to the service intercom',
-    x: 1.45,
-    z: 10.0,
+    x: 2.4,
+    z: 9.6,
     reach: 1.7,
-    rect: [0.691, 0.66, 0.728, 0.72],
+    rect: [0.5088, 0.5039, 0.544, 0.5781],
   },
   {
     id: 'breaker',
     scene: 0,
     label: 'Cut the service feed',
-    x: 1.4,
-    z: 17.3,
+    x: 2.4,
+    z: 19.8,
     reach: 1.7,
-    rect: [0.651, 0.593, 0.684, 0.644],
+    rect: [1.0692, 0.5078, 1.111, 0.6191],
   },
   {
     id: 'crossing',
     scene: 0,
     label: 'Cross toward the tower',
-    x: 0,
-    z: 23.4,
+    x: 0.5,
+    z: 26.8,
     reach: 1.65,
-    rect: [0.55, 0.58, 0.645, 0.645],
+    rect: [1.4154, 0.6836, 1.5846, 0.873],
   },
   {
     id: 'backStreet',

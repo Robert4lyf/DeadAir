@@ -8,8 +8,9 @@ import { scenes, groundPoint, screenPoint, actorHeightUnits } from '../dist/navi
 
 const PERSON = 1.75;
 const references = [
-  { scene: 0, name: 'street bin', u: 0.8, v: 0.875, top: 0.8, range: [0.6, 0.95] },
-  { scene: 0, name: 'street roller shutter', u: 0.9, v: 0.89, top: 0.6, range: [2.2, 3.1] },
+  // Street panorama (u in frame widths): stairwell doorway at the wall, lamp post at the kerb.
+  { scene: 0, name: 'stairwell doorway', u: 0.0846, v: 0.7383, top: 0.4453, range: [1.9, 2.4] },
+  { scene: 0, name: 'street lamp post', u: 0.617, v: 0.8828, top: 0.2051, range: [4, 6] },
   { scene: 1, name: 'studio doors (top step)', x: 0, z: 27.9, px: 63, range: [2.1, 2.8] },
   { scene: 2, name: 'studio desk', u: 0.58, v: 0.595, top: 0.465, range: [0.7, 0.85] },
   { scene: 2, name: 'office chair', u: 0.76, v: 0.668, top: 0.468, range: [0.85, 1.15] },
@@ -18,8 +19,9 @@ const references = [
 
 // Figure height in 720p pixels at a floor point, exactly as the game draws it.
 function figurePx(s, x, z) {
-  const a = screenPoint(s, x - 0.5, z),
-    b = screenPoint(s, x + 0.5, z);
+  const along = s.lateral === 'z',
+    a = screenPoint(s, along ? x : x - 0.5, along ? z - 0.5 : z),
+    b = screenPoint(s, along ? x : x + 0.5, along ? z + 0.5 : z);
   return actorHeightUnits(s) * Math.hypot((b.u - a.u) * 1280, (b.v - a.v) * 720);
 }
 
