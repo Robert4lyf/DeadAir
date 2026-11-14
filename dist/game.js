@@ -57,6 +57,7 @@ function useTouch(on) {
   if (mode === 'play') $('#touch').hidden = !on;
 }
 frame.classList.toggle('touch', touch);
+let last = performance.now(); // previous display frame, for frame timing
 let W = 1280,
   H = 720,
   assets = {},
@@ -174,7 +175,11 @@ async function load() {
     closeDialog('#error');
     $('#loading').hidden = false;
     const names = ['street', 'plaza', 'studio', 'idle', 'walk', 'run'];
-    let images = await Promise.all(names.map((n) => loadImage('./art/' + n + '.webp')));
+    // The standalone build (dead-air.html) inlines the artwork; the hosted site loads files.
+    const inlined = globalThis.DEAD_AIR_ART || {};
+    let images = await Promise.all(
+      names.map((n) => loadImage(inlined[n] || './art/' + n + '.webp')),
+    );
     names.forEach((n, i) => (assets[n] = images[i]));
     actor = new SpriteActor({ idle: assets.idle, walk: assets.walk, run: assets.run });
     ready = true;
@@ -189,11 +194,11 @@ async function load() {
 }
 $('#retry').onclick = load;
 load();
-let audio, master, rainGain, humGain, noiseBuffer;
+let audio, master, rainGain, humGain, voiceBus, noiseBuffer;
 function makeAudio() {
   try {
     if (audio) {
-      audio.resume();
+      syncAudio();
       return;
     }
     audio = new (window.AudioContext || window.webkitAudioContext)();
@@ -219,6 +224,9 @@ function makeAudio() {
     humGain.gain.value = 0.04;
     o.connect(humGain).connect(master);
     o.start();
+    // Transmissions (PA and tower) share a bus so endings can duck the rain under them.
+    voiceBus = audio.createGain();
+    voiceBus.connect(master);
   } catch {
     audio = null;
   }
@@ -237,7 +245,7 @@ function note(freq, duration = 0.15, gain = 0.07, type = 'sine', delay = 0) {
   o.start(at);
   o.stop(at + duration);
 }
-function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0) {
+function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0, bus = master) {
   if (!audio) return;
   const at = audio.currentTime + delay;
   let n = audio.createBufferSource(),
@@ -251,7 +259,7 @@ function noise(gain = 0.08, duration = 0.5, pan = 0, freq = 900, delay = 0) {
   g.gain.setValueAtTime(0.0001, audio.currentTime);
   g.gain.setValueAtTime(gain, at);
   g.gain.exponentialRampToValueAtTime(0.001, at + duration);
-  n.connect(f).connect(g).connect(p).connect(master);
+  n.connect(f).connect(g).connect(p).connect(bus);
   n.start(at);
   n.stop(at + duration);
 }
@@ -264,20 +272,53 @@ function paVoice(words = 8, pan = 0.7, delay = 0, gain = 1) {
       pan,
       1400 + (i % 4) * 260,
       delay + i * 0.27,
+      voiceBus,
     );
 }
-// Subtitles: lower-priority lines wait their turn instead of being dropped, and text the
-// player asked for (by interacting) always shows at once. Important lines it interrupts resume.
+// Subtitles. Every line belongs to the scene it was said in and may carry a `while` condition:
+// the phase that makes it relevant. A line whose scene or phase has ended is dropped, whether it
+// is showing or still waiting. Lower-priority lines queue rather than being discarded; lines the
+// player asked for (tell) show at once, and important lines they interrupt resume afterwards
+// only if they are still relevant.
 let subtitle = null;
 const subtitleQueue = [];
+// The phases that time-sensitive lines belong to. A line said `while: during.x` is dropped as
+// soon as that phase ends, so instructions never resurface after they stop applying.
+const during = {
+  streetQuiet: () => broadcast.phase === 'dormant',
+  warning: () => broadcast.phase === 'warning',
+  transmission: () => broadcast.phase === 'live' && !broadcast.holding,
+  skip: () => recovering(broadcast),
+  holding: () => broadcast.holding && !recovering(broadcast),
+  crossingLocked: () => !crossingOpen(broadcast),
+  anticipation: () => plazaEvent.phase === 'anticipation',
+  doorsOpening: () => plazaEvent.phase === 'opening',
+  monitorIdle: () => prediction.phase === 'idle',
+  preview: () => prediction.phase === 'preview',
+  countdown: () => prediction.phase === 'countdown',
+  settling: () => prediction.phase === 'resolved' && !prediction.ready,
+  microphoneReady: () => prediction.ready && mode === 'play',
+  ending: () => mode === 'ending',
+};
+function relevant(entry) {
+  return time < entry.expires && entry.scene === sceneIndex && (!entry.while || entry.while());
+}
 function showSubtitle(entry) {
   subtitle = entry;
   entry.until = time + entry.seconds;
   setText('#subtitle', entry.text);
 }
-function say(text, seconds = 5, priority = 1, requested = false) {
-  const entry = { text, seconds, priority, until: 0, expires: time + seconds + 6 },
-    active = subtitle && time < subtitle.until;
+function say(text, seconds = 5, priority = 1, { requested = false, while: valid = null } = {}) {
+  const entry = {
+      text,
+      seconds,
+      priority,
+      until: 0,
+      expires: time + seconds + 6,
+      scene: sceneIndex,
+      while: valid,
+    },
+    active = subtitle && time < subtitle.until && relevant(subtitle);
   if (active && subtitle.text === text) return;
   if (!active || requested || priority >= subtitle.priority) {
     if (active && subtitle.priority >= 3 && subtitle.priority > priority) {
@@ -292,16 +333,21 @@ function say(text, seconds = 5, priority = 1, requested = false) {
   }
 }
 // Text that answers a player's own action.
-function tell(text, seconds = 5, priority = 2) {
-  say(text, seconds, priority, true);
+function tell(text, seconds = 5, priority = 2, options = {}) {
+  say(text, seconds, priority, { ...options, requested: true });
 }
 function advanceSubtitles() {
-  if (!subtitle || time < subtitle.until) return;
+  if (subtitle && time < subtitle.until && relevant(subtitle)) return;
   subtitle = null;
   while (subtitleQueue.length) {
     const next = subtitleQueue.shift();
-    if (time < next.expires) return showSubtitle(next);
+    if (relevant(next)) return showSubtitle(next);
   }
+  setText('#subtitle', '');
+}
+function clearSubtitles() {
+  subtitle = null;
+  subtitleQueue.length = 0;
   setText('#subtitle', '');
 }
 function status(text, seconds = 2) {
@@ -359,7 +405,9 @@ function enter() {
   $('#hud').hidden = false;
   $('#touch').hidden = !touch;
   setChapter();
-  say('Find the crossing at the end of the street. The studio is still on air.', 6);
+  say('Find the crossing at the end of the street. The studio is still on air.', 6, 1, {
+    while: during.streetQuiet,
+  });
 }
 function pause(show = true) {
   if (!['play', 'pause'].includes(mode)) return;
@@ -367,7 +415,34 @@ function pause(show = true) {
   keys.clear();
   if (show) openDialog('#modal');
   else closeDialog('#modal');
-  if (audio) master.gain.setTargetAtTime(show || muted ? 0 : 0.42, audio.currentTime, 0.1);
+  syncAudio();
+}
+// Suspension: while the page is hidden or unfocused the whole game stands still. tick() runs no
+// timeline at all (play, insert shots, recovery, transitions, the ending) and the audio context
+// is suspended, so sounds already playing freeze instead of running on unheard. Ordinary play
+// also opens the pause menu; every other mode carries on from the same instant on return.
+// Both functions are idempotent, so blur and visibility events arriving together are harmless.
+let suspended = false;
+function suspend() {
+  if (suspended) return;
+  suspended = true;
+  keys.clear();
+  if (mode === 'play') pause(true);
+  syncAudio();
+}
+function wake() {
+  if (!suspended || document.hidden || !(document.hasFocus?.() ?? true)) return;
+  suspended = false;
+  last = performance.now(); // no catch-up jump for the time spent away
+  syncAudio();
+}
+// One place decides what the player hears: their sound preference, pause and suspension.
+function syncAudio() {
+  if (!audio) return;
+  const halted = suspended || mode === 'pause';
+  master.gain.setTargetAtTime(halted || muted ? 0 : 0.42, audio.currentTime, 0.1);
+  if (halted) audio.suspend?.();
+  else audio.resume?.();
 }
 function changeScene(next) {
   if (sceneIndex === 1) leavePlaza(plazaEvent);
@@ -386,6 +461,7 @@ function changeScene(next) {
 }
 function applyTransition() {
   sceneIndex = transitionTarget;
+  advanceSubtitles(); // lines from the previous scene end with it
   let spawn =
     sceneIndex === 0
       ? { x: 0, z: 22.1 }
@@ -446,6 +522,16 @@ function label(o) {
         : 'The boom microphone';
   return o.label;
 }
+const STAND_TOLERANCE = 0.12,
+  MONITOR_SCREEN = { u: 0.748, v: 0.405 };
+function atStandingSpot(o) {
+  return Math.hypot(player.x - o.x, player.z - o.z) <= STAND_TOLERANCE;
+}
+// Sprite facing (0 = up the screen) from the player toward a point in the frame.
+function facingToScreen(target) {
+  const p = screenPoint(scenes[sceneIndex], player.x, player.z);
+  return Math.atan2(target.u - p.u, -(target.v - p.v));
+}
 function interact(id = interaction?.id) {
   if (mode !== 'play' || !id || controlLocked()) return false;
   let object = interactables.find((o) => o.id === id);
@@ -490,6 +576,7 @@ function interact(id = interaction?.id) {
           : 'The crossing is locked while the tower transmits. Shelter under the awning or cut the service feed.',
         6,
         3,
+        { while: during.crossingLocked },
       );
       return false;
     }
@@ -497,13 +584,20 @@ function interact(id = interaction?.id) {
   } else if (id === 'backStreet') changeScene(0);
   else if (id === 'doors') {
     if (!doorsOpen(plazaEvent)) {
-      tell('The doors are still sliding open.', 2);
+      tell('The doors are still sliding open.', 2, 2, { while: during.doorsOpening });
       return false;
     }
     changeScene(2);
   } else if (id === 'backPlaza') changeScene(1);
   else if (id === 'monitor') {
+    if (prediction.phase === 'idle' && !atStandingSpot(object)) {
+      // Walk to the viewing point first; the sequence starts when the player gets there.
+      path = route(scenes[2], player, object);
+      queuedAction = 'monitor';
+      return true;
+    }
     if (startPrediction(prediction, player)) {
+      player.desiredFacing = facingToScreen(MONITOR_SCREEN);
       facts.monitor = true;
       keys.clear();
       path = [];
@@ -514,9 +608,12 @@ function interact(id = interaction?.id) {
         'The picture jumps. On the monitor, the studio is seven seconds ahead of you.',
         PREVIEW,
         4,
+        { while: during.preview },
       );
     } else if (prediction.phase === 'countdown')
-      tell('On the monitor, you are already standing at the microphone.', 3);
+      tell('On the monitor, you are already standing at the microphone.', 3, 2, {
+        while: during.countdown,
+      });
     else if (prediction.phase === 'resolved')
       tell(
         prediction.outcome === 'followed'
@@ -535,7 +632,9 @@ function interact(id = interaction?.id) {
           : 'On the monitor, the other you is still at the microphone, waiting to hear what you will do.';
       openDialog('#decision');
     } else if (prediction.phase === 'idle')
-      tell('The microphone is cold. On the monitor, the room is moving.', 4);
+      tell('The microphone is cold. On the monitor, the room is moving.', 4, 2, {
+        while: during.monitorIdle,
+      });
     else if (prediction.phase === 'countdown') {
       // Step the last half-metre onto the tape, so the room matches the picture.
       if (!atMark(player) || Math.hypot(player.x - MARK.x, player.z - MARK.z) > 0.2)
@@ -543,8 +642,11 @@ function interact(id = interaction?.id) {
       tell(
         'You step onto the tape mark and reach for the microphone. On the monitor, you already have.',
         3,
+        2,
+        { while: during.countdown },
       );
-    } else if (prediction.phase === 'resolved') tell('The picture is still settling.', 2);
+    } else if (prediction.phase === 'resolved')
+      tell('The picture is still settling.', 2, 2, { while: during.settling });
   }
   updateObjective();
   return true;
@@ -556,6 +658,9 @@ function finish(choice) {
   closeDialog('#decision');
   ending = {
     clock: 0,
+    nextCue: 0,
+    nextCaption: 0,
+    flareAt: -10, // when the tower last transmitted, for the sign's flare
     ...composeEnding({
       choice,
       outcome: prediction.outcome,
@@ -567,21 +672,57 @@ function finish(choice) {
   keys.clear();
   path = [];
   $('#touch').hidden = true;
-  subtitleQueue.length = 0;
-  say(ending.caption, ending.duration, 9);
+  clearSubtitles();
+  cancelAmbience();
+  runEndingTimeline();
+}
+// Fires the ending's cues and captions as gameplay time reaches them, each exactly once.
+function runEndingTimeline() {
+  const e = ending;
+  while (e.nextCaption < e.captions.length && e.captions[e.nextCaption].at <= e.clock) {
+    const c = e.captions[e.nextCaption++],
+      until = e.captions[e.nextCaption]?.at ?? e.duration;
+    say(c.text, until - c.at, 9, { while: () => mode === 'ending' });
+  }
+  while (e.nextCue < e.cues.length && e.cues[e.nextCue].at <= e.clock)
+    endingCue(e.cues[e.nextCue++].id);
+}
+// Drops any queued rain/hum automation (e.g. an ending's rain swell) so nothing stale plays on.
+function cancelAmbience() {
   if (!audio) return;
-  const now = audio.currentTime;
-  if (choice === 'speak') {
-    rainGain.gain.setTargetAtTime(0.22, now, 1.2);
-    humGain.gain.setTargetAtTime(0.1, now, 1);
-    paVoice(10, 0);
-    if (ending.echo) paVoice(10, -0.5, 1.9, 0.7);
-    [147, 220, 294, 370].forEach((f, i) => note(f, 3.6 - i * 0.3, 0.035, 'triangle', i * 0.35));
-  } else {
-    // Dead air: everything falls away and stays away for the full seven seconds.
-    rainGain.gain.setTargetAtTime(0, now, 0.7);
-    humGain.gain.setTargetAtTime(0, now, 0.5);
+  for (const g of [rainGain.gain, humGain.gain]) {
+    const v = g.value;
+    g.cancelScheduledValues(audio.currentTime);
+    g.setValueAtTime(v, audio.currentTime);
+  }
+}
+function endingCue(id) {
+  const now = audio?.currentTime ?? 0,
+    chord = (gain) =>
+      [147, 220, 294, 370].forEach((f, i) => note(f, 3.2 - i * 0.3, gain, 'triangle', i * 0.3));
+  if (id === 'broadcast' || id === 'early-broadcast' || id === 'late-broadcast') {
+    ending.flareAt = time;
+    if (audio) {
+      // The rain swells for the rest of the ending, but ducks while the tower transmits so
+      // each transmission (including the late one) is clearly heard over it.
+      rainGain.gain.cancelScheduledValues(now);
+      rainGain.gain.setTargetAtTime(0.06, now, 0.15);
+      rainGain.gain.setTargetAtTime(0.22, now + 2.8, 0.9);
+      humGain.gain.setTargetAtTime(0.1, now, 1);
+    }
+    paVoice(10, id === 'early-broadcast' ? 0.45 : 0, 0, 1.6);
+    if (id !== 'early-broadcast') chord(0.035);
+  } else if (id === 'dead-air') {
+    // Everything falls away; the only sound left is the click of a channel opening.
+    if (audio) {
+      rainGain.gain.setTargetAtTime(0, now, 0.7);
+      humGain.gain.setTargetAtTime(0, now, 0.5);
+    }
     note(144, 0.4, 0.05);
+  } else if (id === 'intrusion') {
+    noise(0.09, 0.25, 0.4, 3000);
+    paVoice(6, 0.4, 0.1);
+    note(55, 1.5, 0.07, 'sawtooth');
   }
 }
 function showEndingCard() {
@@ -614,10 +755,9 @@ function restart() {
   skipAt = -10;
   feedTearUntil = 0;
   statusUntil = 0;
-  subtitle = null;
-  subtitleQueue.length = 0;
-  setText('#subtitle', '');
+  clearSubtitles();
   $('#fade').style.opacity = '0';
+  cancelAmbience();
   if (audio) {
     rainGain.gain.setTargetAtTime(0.11, audio.currentTime, 0.5);
     humGain.gain.setTargetAtTime(0.04, audio.currentTime, 0.5);
@@ -643,8 +783,7 @@ $('#sound').onclick = () => {
   muted = !muted;
   $('#sound').textContent = muted ? 'SOUND OFF' : 'SOUND ON';
   $('#sound').setAttribute('aria-pressed', String(!muted));
-  if (audio)
-    master.gain.setTargetAtTime(muted || mode === 'pause' ? 0 : 0.42, audio.currentTime, 0.1);
+  syncAudio();
 };
 $('#restart').onclick = restart;
 $('#interaction').onclick = () => interact();
@@ -656,6 +795,7 @@ const gameKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'];
 const playing = () => mode === 'play' || mode === 'transition';
 addEventListener('keydown', (e) => {
   if (e.key === 'Tab') trapFocus(e);
+  if (suspended) return;
   if (playing() && gameKeys.includes(e.code)) e.preventDefault();
   if (e.code === 'Escape' && !e.repeat) {
     if (mode === 'title') closeDialog('#modal');
@@ -687,13 +827,9 @@ addEventListener('keyup', (e) => {
   // Space activates a focused button on keyup; during play it means Interact instead.
   if (playing() && e.code === 'Space') e.preventDefault();
 });
-addEventListener('blur', () => {
-  keys.clear();
-  if (mode === 'play') pause(true);
-});
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && mode === 'play') pause(true);
-});
+addEventListener('blur', suspend);
+addEventListener('focus', wake);
+document.addEventListener('visibilitychange', () => (document.hidden ? suspend() : wake()));
 function pointer(e) {
   let r = canvas.getBoundingClientRect();
   return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height };
@@ -735,7 +871,8 @@ canvas.addEventListener('pointerleave', () => {
 });
 canvas.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'touch' && !touch) useTouch(true);
-  if (mode !== 'play' || controlLocked() || performance.now() - dialogClosedAt < 400) return;
+  if (suspended || mode !== 'play' || controlLocked() || performance.now() - dialogClosedAt < 400)
+    return;
   let { u, v } = pointer(e),
     o = objectAt(u, v, e.pointerType === 'touch' ? 22 : 4),
     s = scenes[sceneIndex],
@@ -786,12 +923,15 @@ function encounterEvent(event) {
       'The lamps begin to hum. Shelter beneath the right-hand awning, or cut the service feed ahead.',
       7,
       4,
+      { while: during.warning },
     );
     noise(0.13, 1.5, 0.6, 1200);
     path = [];
     queuedAction = null;
   } else if (event === 'live') {
-    say('ON AIR. Stay beneath the awning. The open crossing is listening.', 4, 4);
+    say('ON AIR. Stay beneath the awning. The open crossing is listening.', 4, 4, {
+      while: during.transmission,
+    });
     note(54, 0.8, 0.12, 'sawtooth');
   } else if (event === 'caught') {
     // The picture skips: input is held while the frame rolls, and the player lands in shelter.
@@ -802,7 +942,7 @@ function encounterEvent(event) {
     path = [];
     queuedAction = null;
     skipAt = time;
-    say('The picture skips.', RECOVERY, 5);
+    say('The picture skips.', RECOVERY, 5, { while: during.skip });
     noise(0.16, 0.6, 0, 1200);
     note(110, RECOVERY, 0.06, 'sawtooth');
   } else if (event === 'recovered') {
@@ -812,6 +952,7 @@ function encounterEvent(event) {
         : 'You are back under the awning, and the street lamp has turned red. The tower has your picture now; it will not pass on its own. Cut the service feed: the breaker is at the far end of this awning.',
       9,
       5,
+      { while: during.holding },
     );
   } else if (event === 'clear') {
     say(
@@ -826,7 +967,9 @@ function encounterEvent(event) {
 }
 function plazaBeat(event) {
   if (event === 'anticipate') {
-    say('A horn speaker on the tower crackles: “Door opening for our guest.”', 6, 4);
+    say('A horn speaker on the tower crackles: “Door opening for our guest.”', 6, 4, {
+      while: during.anticipation,
+    });
     noise(0.07, 0.5, 0.75, 2600);
     paVoice(6);
     if (audio) humGain.gain.setTargetAtTime(0.13, audio.currentTime, 1.5);
@@ -835,6 +978,7 @@ function plazaBeat(event) {
       'A lock releases. The studio doors slide open on their own. You are nowhere near them.',
       6,
       5,
+      { while: during.doorsOpening },
     );
     noise(0.16, 0.18, 0.2, 260);
     note(62, 0.5, 0.1, 'triangle');
@@ -868,6 +1012,7 @@ function predictionEvent(event) {
       'The picture is seven seconds ahead. On it, you are standing on the tape mark at the microphone. Go to it, or stay where you are.',
       LEAD,
       5,
+      { while: during.countdown },
     );
     noise(0.05, 0.25, 0.3, 2400);
   } else if (event === 'tick') {
@@ -897,6 +1042,7 @@ function predictionEvent(event) {
         : 'The microphone is waiting for you.',
       5,
       2,
+      { while: during.microphoneReady },
     );
   }
   updateObjective();
@@ -926,6 +1072,7 @@ function update(dt) {
   if (mode === 'ending') {
     time += dt;
     ending.clock += dt;
+    runEndingTimeline();
     advanceSubtitles();
     if (ending.clock >= ending.duration) showEndingCard();
     return;
@@ -962,7 +1109,12 @@ function update(dt) {
   player.moving = false;
   if (queuedAction && !mx && !my) {
     let object = interactables.find((o) => o.id === queuedAction);
-    if (object && Math.hypot(player.x - object.x, player.z - object.z) < object.reach * 0.85) {
+    // Objects with a standing spot act only on arrival (end of the path), never early.
+    if (
+      object &&
+      !object.stand &&
+      Math.hypot(player.x - object.x, player.z - object.z) < object.reach * 0.85
+    ) {
       let action = queuedAction;
       queuedAction = null;
       path = [];
@@ -1588,9 +1740,10 @@ function drawEnding() {
   ctx.save();
   if (e.tower === 'blazing') {
     ctx.globalCompositeOperation = 'screen';
-    const pulse = reduced ? 0 : Math.sin(time * 6) * 0.08;
-    softLight(su, sv, sr * 0.9, '255,90,70', (0.55 + pulse) * k);
-    softLight(su, sv, sr * 3, '230,40,28', (0.22 + pulse) * k);
+    const pulse = reduced ? 0 : Math.sin(time * 6) * 0.08,
+      flare = Math.max(0, 1 - (time - e.flareAt) / 1.4) * 0.35;
+    softLight(su, sv, sr * 0.9, '255,90,70', (0.55 + pulse) * k + flare);
+    softLight(su, sv, sr * 3, '230,40,28', (0.22 + pulse) * k + flare * 0.6);
   } else {
     // The painted neon is bright: cover the whole sign evenly, then dim its halo.
     ctx.globalCompositeOperation = 'multiply';
@@ -1598,6 +1751,12 @@ function drawEnding() {
     polygon(sign);
     ctx.fill();
     softLight(su, sv, sr * 2.2, '30,32,38', 0.6 * k);
+    // Silence broken: the dark sign stutters back to red while the tower transmits.
+    if (e.intrusion && e.clock >= e.intrusion.from && e.clock < e.intrusion.to) {
+      const on = reduced || Math.sin(time * 31) * Math.sin(time * 7) > -0.2;
+      ctx.globalCompositeOperation = 'screen';
+      softLight(su, sv, sr * 1.2, '255,60,40', on ? 0.6 : 0.12);
+    }
   }
   ctx.restore();
   if (index === 0) {
@@ -1677,15 +1836,17 @@ function drawMarker() {
   }
   ctx.restore();
 }
-let last = performance.now();
+// Advances the game by one display frame; nothing moves while paused, choosing or suspended.
+function tick(dt) {
+  if (suspended || mode === 'pause' || mode === 'choice') return;
+  elapsed += dt;
+  let count = Math.ceil(dt / 0.05);
+  for (let i = 0; i < count; i++) update(dt / count);
+}
 function render(now) {
   let dt = Math.min(0.15, (now - last) / 1000);
   last = now;
-  if (mode !== 'pause' && mode !== 'choice') {
-    elapsed += dt;
-    let count = Math.ceil(dt / 0.05);
-    for (let i = 0; i < count; i++) update(dt / count);
-  }
+  tick(dt);
   if (ready) {
     const s = scenes[sceneIndex];
     const insert = sceneIndex === 2 && insertShot(prediction);

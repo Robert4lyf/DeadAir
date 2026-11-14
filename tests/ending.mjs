@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { composeEnding, SILENCE_DURATION } from '../dist/ending.js';
+import { composeEnding, LATE, INTRUSION } from '../dist/ending.js';
+
+const SILENCE_SECONDS = 7;
 
 const base = { outcome: 'followed', caught: false, cut: false };
 
@@ -12,22 +14,56 @@ test('the two choices resolve differently in sound, picture and words', () => {
   assert.equal(silence.tower, 'dark');
   assert.equal(speak.rain, 'heavier');
   assert.equal(silence.rain, 'silent');
-  assert.equal(silence.duration, SILENCE_DURATION, 'Seven seconds of dead air');
+  assert.equal(silence.duration, SILENCE_SECONDS, 'Seven seconds of dead air');
   assert.match(silence.weather, /silent/);
   assert.match(speak.weather, /harder/);
 });
 
-test('the prediction outcome resolves the seven-second motif', () => {
-  const followed = composeEnding({ ...base, choice: 'speak' }),
-    resisted = composeEnding({ ...base, choice: 'speak', outcome: 'resisted' });
-  assert.match(followed.motif, /seven seconds are gone/);
-  assert.match(resisted.motif, /seven seconds late/);
-  assert.equal(resisted.echo, true, 'Resisting makes the broadcast echo');
-  assert.equal(followed.echo, false);
-  assert.match(
-    composeEnding({ ...base, choice: 'silence', outcome: 'resisted' }).motif,
-    /other you/,
+test('every combination has its own timeline, and claims match their timing', () => {
+  const at = (e, id) => e.cues.find((c) => c.id === id)?.at;
+  const speakFollowed = composeEnding({ ...base, choice: 'speak' });
+  assert.deepEqual(
+    speakFollowed.cues.map((c) => c.id),
+    ['broadcast'],
   );
+  assert.match(speakFollowed.motif, /seven seconds are gone/);
+
+  const speakResisted = composeEnding({ ...base, choice: 'speak', outcome: 'resisted' });
+  assert.equal(at(speakResisted, 'early-broadcast'), 0);
+  assert.equal(
+    at(speakResisted, 'late-broadcast'),
+    LATE,
+    'The late voice really is seven seconds late',
+  );
+  assert.equal(LATE, 7);
+  assert(speakResisted.duration >= LATE + 2, 'Time to hear the late voice before the card');
+  assert.match(speakResisted.motif, /seven seconds later/);
+
+  const silenceFollowed = composeEnding({ ...base, choice: 'silence' });
+  assert.deepEqual(
+    silenceFollowed.cues.map((c) => c.id),
+    ['dead-air'],
+    'Uninterrupted dead air',
+  );
+  assert.equal(silenceFollowed.duration, SILENCE_SECONDS);
+  assert.equal(silenceFollowed.intrusion, null);
+
+  const silenceResisted = composeEnding({ ...base, choice: 'silence', outcome: 'resisted' });
+  assert.deepEqual(
+    silenceResisted.cues.map((c) => c.id),
+    ['dead-air', 'intrusion'],
+  );
+  assert.equal(at(silenceResisted, 'intrusion'), INTRUSION.from);
+  assert(silenceResisted.intrusion.to < silenceResisted.duration - 2, 'Silence returns after it');
+  assert.doesNotMatch(silenceResisted.motif, /\bsaid\b.*"|“/, 'No quoted, intelligible dialogue');
+
+  for (const e of [speakFollowed, speakResisted, silenceFollowed, silenceResisted]) {
+    assert(
+      e.captions.length >= e.cues.filter((c) => c.at > 0).length,
+      'Each later cue is captioned',
+    );
+    assert(Math.max(...e.cues.map((c) => c.at)) < e.duration, 'Every cue lands before the card');
+  }
 });
 
 test('being caught changes the final shot and the lamp, not only a sentence', () => {
